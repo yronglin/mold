@@ -13,6 +13,12 @@
 # include <alloca.h>
 #endif
 
+// This is the preload library behind `mold -run`. `mold -run` sets
+// LD_PRELOAD to this library and MOLD_PATH to the mold executable, so the
+// library is loaded into every process that the command starts. It
+// interposes the exec family of functions and posix_spawn() and runs mold
+// in place of `ld`, `ld.lld`, `ld.gold`, `ld.bfd` or `ld.mold`.
+
 extern char **environ;
 
 static char *get_mold_path() {
@@ -72,6 +78,8 @@ int execvpe(const char *file, char *const *argv, char *const *envp) {
   if (!strcmp(file, "ld") || is_ld(file))
     file = get_mold_path();
 
+  // execvp() takes the environment from `environ`, so put the given
+  // variables there.
   for (int i = 0; envp[i]; i++)
     putenv(envp[i]);
 

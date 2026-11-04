@@ -7,6 +7,9 @@
 #include <tbb/concurrent_hash_map.h>
 #include <tbb/parallel_for_each.h>
 
+// This file implements --print-map (or -Map). It prints a listing of
+// output sections, their input sections and symbols.
+
 namespace mold {
 
 template <typename E>

@@ -53,6 +53,7 @@ enum PluginApiVersion {
   LD_PLUGIN_API_VERSION = 1,
 };
 
+// An entry of the transfer vector handed to `onload`.
 struct PluginTagValue {
   PluginTagValue(PluginTag tag, int val) : tag(tag), val(val) {}
   PluginTagValue(PluginTag tag, auto *ptr) : tag(tag), ptr((void *)ptr) {}

@@ -37,6 +37,8 @@ void acquire_global_lock() {
   if (fd == -1)
     return;
 
+  // Use lockf for compatibility with other mold processes; flock uses a
+  // different locking protocol.
   if (lockf(fd, F_LOCK, 0) == -1)
     return;
   lock_fd = fd;

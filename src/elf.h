@@ -1497,6 +1497,9 @@ enum : u32 {
 // ELF types
 //
 
+// Integer fields in ELF records use the target's byte order rather than
+// the host's, and records in archive members may be unaligned. See
+// lib/integers.h for details.
 template <typename E> using I16 = std::conditional_t<E::is_le, il16, ib16>;
 template <typename E> using I32 = std::conditional_t<E::is_le, il32, ib32>;
 template <typename E> using I64 = std::conditional_t<E::is_le, il64, ib64>;
@@ -1505,6 +1508,7 @@ template <typename E> using U24 = std::conditional_t<E::is_le, ul24, ub24>;
 template <typename E> using U32 = std::conditional_t<E::is_le, ul32, ub32>;
 template <typename E> using U64 = std::conditional_t<E::is_le, ul64, ub64>;
 
+// The pointer-sized integer field of a target.
 template <typename E> using Word = std::conditional_t<E::is_64, U64<E>, U32<E>>;
 template <typename E> using SWord = std::conditional_t<E::is_64, I64<E>, I32<E>>;
 
@@ -1567,6 +1571,10 @@ struct ElfSym<E> {
 
   U32<E> st_name;
 
+  // st_type and st_bind are the two halves of the st_info byte. The
+  // following union is st_other, whose low two bits hold the symbol
+  // visibility; targets use the remaining bits for their own flags.
+  // The order of bitfields depends on the host's byte order.
 #ifdef __LITTLE_ENDIAN__
   u8 st_type : 4;
   u8 st_bind : 4;
@@ -1616,6 +1624,10 @@ struct ElfSym<E> {
   U32<E> st_value;
   U32<E> st_size;
 
+  // st_type and st_bind are the two halves of the st_info byte. The
+  // following union is st_other, whose low two bits hold the symbol
+  // visibility; targets use the remaining bits for their own flags.
+  // The order of bitfields depends on the host's byte order.
 #ifdef __LITTLE_ENDIAN__
   u8 st_type : 4;
   u8 st_bind : 4;
@@ -1709,6 +1721,13 @@ struct ElfPhdr<E> {
 // We don't want to have too many `if (REL)`s and `if (RELA)`s in our
 // codebase, so ElfRel always takes r_addend as a constructor argument.
 // If it's REL, the argument will simply be ignored.
+//
+// r_info packs the symbol index and the relocation type into one word.
+// ELF32 keeps the relocation type in the low 8 bits of r_info and the
+// symbol index above them; ELF64 gives each 32 bits. We represent them as
+// separate fields, so their order in memory depends on the byte order;
+// that's why little- and big-endian targets have different
+// specializations.
 template <typename E> requires (E::is_le && E::is_rela)
 struct ElfRel<E> {
   ElfRel() = default;
@@ -1755,12 +1774,14 @@ struct ElfRel<E> {
   std::conditional_t<E::is_64, U32<E>, u8> r_type;
 };
 
+// An entry of the .dynamic section.
 template <typename E>
 struct ElfDyn {
   Word<E> d_tag;
   Word<E> d_val;
 };
 
+// A .gnu.version_r file entry.
 template <typename E>
 struct ElfVerneed {
   U16<E> vn_version;
@@ -1770,6 +1791,7 @@ struct ElfVerneed {
   U32<E> vn_next;
 };
 
+// A .gnu.version_r version entry.
 template <typename E>
 struct ElfVernaux {
   U32<E> vna_hash;
@@ -1779,6 +1801,7 @@ struct ElfVernaux {
   U32<E> vna_next;
 };
 
+// A .gnu.version_d definition entry.
 template <typename E>
 struct ElfVerdef {
   U16<E> vd_version;
@@ -1790,12 +1813,14 @@ struct ElfVerdef {
   U32<E> vd_next;
 };
 
+// A .gnu.version_d name entry.
 template <typename E>
 struct ElfVerdaux {
   U32<E> vda_name;
   U32<E> vda_next;
 };
 
+// The header of a compressed section.
 template <typename E> requires E::is_64
 struct ElfChdr<E> {
   U32<E> ch_type;
@@ -1811,6 +1836,7 @@ struct ElfChdr<E> {
   U32<E> ch_addralign;
 };
 
+// A note header.
 template <typename E>
 struct ElfNhdr {
   U32<E> n_namesz;
@@ -1822,6 +1848,9 @@ struct ElfNhdr {
 // Target-specific ELF data types
 //
 
+// SPARC64 splits r_info's 32-bit type field: the low 8 bits are the
+// relocation type proper, and the upper 24 bits hold a second addend,
+// which is used by R_SPARC_OLO10.
 template <>
 struct ElfRel<SPARC64> {
   ElfRel() = default;

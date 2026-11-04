@@ -11,6 +11,8 @@
 namespace mold {
 
 i64 HyperLogLog::get_cardinality() const {
+  // Combine per-thread sketches, as if every value had been inserted into
+  // one of them.
   u8 buckets[NBUCKETS] = {};
   for (const Sketch &sketch : sketches)
     for (i64 i = 0; i < NBUCKETS; i++)

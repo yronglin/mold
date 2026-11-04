@@ -10,8 +10,8 @@
 // bootstrapping the entire ecosystem for LoongArch, sending patches to
 // Linux, GCC, LLVM, etc.
 //
-// Speaking of the ISA, all instructions are 4 byte long and aligned to 4
-// byte boundaries in LoongArch. It has 32 general-purpose registers.
+// Speaking of the ISA, all instructions are 4 bytes long and aligned to
+// 4-byte boundaries in LoongArch. It has 32 general-purpose registers.
 // Among these, $t0 - $t8 (aliases for $r12 - $r20) are temporary
 // registers that we can use in our PLT.
 //
@@ -41,31 +41,31 @@ static u64 hi20(u64 val, u64 pc) {
   //   addi.d    $rN, $rN, %lo12(sym)
   //
   // PCALAU12I materializes bits [63:12] by computing (pc + imm << 12)
-  // and zero-clear [11:0]. ADDI.D sign-extends its 12 bit immediate and
-  // add it to the register. To compensate the sign-extension, PCALAU12I
-  // needs to materialize a 0x1000 larger value than the desired [63:12]
-  // if [11:0] is sign-extended.
+  // and zero-clears [11:0]. ADDI.D sign-extends its 12-bit immediate and
+  // adds it to the register. To compensate for the sign extension,
+  // PCALAU12I needs to materialize a value 0x1000 larger than the desired
+  // [63:12] if [11:0] is sign-extended.
   //
-  // This is similar but different from RISC-V because RISC-V's AUIPC
+  // This is similar to but different from RISC-V because RISC-V's AUIPC
   // doesn't zero-clear [11:0].
   return bits(page(val + 0x800) - page(pc), 31, 12);
 }
 
 static u64 higher(u64 val, u64 pc) {
   // A PC-relative 64-bit address is materialized with the following
-  // instructions for the large code model:
+  // instructions for the extreme code model:
   //
   //   pcalau12i $rN, %pc_hi20(sym)
   //   addi.d    $rM, $zero, %lo12(sym)
   //   lu32i.d   $rM, %pc64_lo20(sym)
-  //   lu52i.d   $rM, $r12, %pc64_hi12(sym)
+  //   lu52i.d   $rM, $rM, %pc64_hi12(sym)
   //   add.d     $rN, $rN, $rM
   //
   // PCALAU12I computes (pc + imm << 12) to materialize a 64-bit value.
   // ADDI.D adds a sign-extended 12 bit value to a register. LU32I.D and
-  // LU52I.D simply set bits to [51:31] and to [63:53], respectively.
+  // LU52I.D simply set bits [51:32] and [63:52], respectively.
   //
-  // Compensating all the sign-extensions is a bit complicated. The
+  // Compensating for all the sign extensions is a bit complicated. The
   // psABI gives the following formula.
   val = val + 0x8000'0000 + ((val & 0x800) ? (0x1000 - 0x1'0000'0000) : 0);
   return page(val) - page(pc - 8);
@@ -79,6 +79,7 @@ static u64 highest12(u64 val, u64 pc) {
   return bits(higher(val, pc), 63, 52);
 }
 
+// Instruction formats, named after their immediate fields.
 static void write_k12(u8 *loc, u32 val) {
   // opcode, [11:0], rj, rd
   *(ul32 *)loc &= 0b1111111111'000000000000'11111'11111;
@@ -126,7 +127,7 @@ static void set_rj(u8 *loc, u32 rj) {
 }
 
 // Returns true if isec's i'th relocation refers to the following
-// relaxable instructioon pair.
+// relaxable instruction pair.
 //
 //   pcalau12i $t0, 0         # R_LARCH_GOT_PC_HI20, R_LARCH_RELAX
 //   ld.d      $t0, $t0, 0    # R_LARCH_GOT_PC_LO12, R_LARCH_RELAX
@@ -913,22 +914,23 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
     const ElfRel<E> &r = rels[i];
     Symbol<E> &sym = *isec.file->symbols[r.r_sym];
 
+    // Records that `d` bytes are removed at relocation `r`.
     auto remove = [&](i64 d) {
       r_delta += d;
       deltas.push_back(RelocDelta{r.r_offset, r_delta});
     };
 
-    // A R_LARCH_ALIGN relocation refers to the beginning of a nop
-    // sequence. We need to remove some or all of them so that the
-    // instruction that immediately follows that is aligned to a specified
-    // boundary. To allow that, a R_LARCH_ALIGN relocation that requests
+    // An R_LARCH_ALIGN relocation refers to the beginning of a nop
+    // sequence. We need to remove some or all of the nops so that the
+    // instruction that immediately follows them is aligned to a specified
+    // boundary. To allow that, an R_LARCH_ALIGN relocation that requests
     // 2^n alignment refers to 2^n - 4 bytes of nop instructions.
     if (r.r_type == R_LARCH_ALIGN) {
       // The actual rule for storing the alignment size is a bit weird.
-      // In particular, the most significant 56 bits of r_addend is
-      // sometimes used to store the upper limit of the alignment,
-      // allowing the instruction that follows nops _not_ to be aligned at
-      // all. I think that's a spec bug, so we don't want to support that.
+      // In particular, the most significant 56 bits of r_addend are
+      // sometimes used to store the maximum number of padding bytes,
+      // allowing the instruction that follows the nops _not_ to be aligned
+      // at all. I think that's a spec bug, so we don't want to support that.
       i64 alignment;
       if (r.r_sym) {
         if (r.r_addend >> 8)
@@ -1004,13 +1006,13 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
       }
       break;
     case R_LARCH_CALL36:
-      // A CALL36 relocation referes to the following instruction pair
+      // A CALL36 relocation refers to the following instruction pair
       // to jump to PC ± 128 GiB.
       //
       //   pcaddu18i $t0,       0         # R_LARCH_CALL36
       //   jirl      $zero/$ra, $t0, 0
       //
-      // If the displacement is PC ± 128 MiB, we can use B or BL instead.
+      // If the displacement is within ±128 MiB, we can use B or BL instead.
       // Note that $zero is $r0 and $ra is $r1.
       if (i64 dist = compute_distance(ctx, sym, isec, r);
           is_int(dist, 28))

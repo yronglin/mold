@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cstring>
 
+// The template parameters select the number of compression rounds, the
+// number of finalization rounds and the output size (64 or 128 bits).
 template <int C_ROUNDS, int D_ROUNDS, int OUTLEN>
 class SipHashTmpl {
 public:

@@ -1,13 +1,13 @@
-// This file contains code for the Motorola 68000 series microprocessors,
-// which is often abbreviated as m68k. Running a Unix-like system on a
-// m68k-based machine today is a retro-computing hobby activity, but the
-// processor was a popular choice to build Unix computers during '80s.
-// Early Sun workstations for example used m68k. Macintosh until 1994 were
-// based on m68k as well until they switched to PowerPC (and then to x86
-// and to ARM.)
+// This file contains code for the Motorola 68000 series of
+// microprocessors, which is often abbreviated as m68k. Running a Unix-like
+// system on an m68k-based machine today is a retro-computing hobby
+// activity, but the processor was a popular choice for building Unix
+// computers during the '80s. Early Sun workstations, for example, used
+// m68k. Macintoshes were also based on m68k until they switched to
+// PowerPC in 1994 (and later to x86 and ARM).
 //
 // From the linker's point of view, it is not hard to support m68k. It's
-// just a 32-bit big-endian CISC ISA. Compared to comtemporary i386,
+// just a 32-bit big-endian CISC ISA. Compared to contemporary i386,
 // m68k's psABI is actually simpler because m68k has PC-relative memory
 // access instructions and therefore can support position-independent
 // code without too much hassle.
@@ -101,6 +101,8 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       check_range(ctx, i, val, lo, hi);
     };
 
+    // Narrower fields are signed displacements except for the absolute
+    // R_68K_16 and R_68K_8.
     auto write16 = [&](u64 val) {
       check(val, 0, 1 << 16);
       *(ub16 *)loc = val;

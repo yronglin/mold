@@ -12,6 +12,8 @@ static bool is_text_file(MappedFile *mf) {
          istext(data[2]) && istext(data[3]);
 }
 
+// Returns true if a given ELF relocatable object is really a GCC LTO
+// object.
 template <typename E>
 static bool is_gcc_lto_obj(MappedFile *mf, bool has_gcc_plugin) {
   const char *data = mf->get_contents().data();
@@ -19,22 +21,22 @@ static bool is_gcc_lto_obj(MappedFile *mf, bool has_gcc_plugin) {
   ElfShdr<E> *sh_begin = (ElfShdr<E> *)(data + ehdr.e_shoff);
 
   // e_shnum is a 16-bit field. If an object file contains more than 65279
-  // sections, e_shnum is zero and the actual number is stored to the first
+  // sections, e_shnum is zero and the actual number is stored in the first
   // section header's sh_size field.
   i64 num_sections = (ehdr.e_shnum == 0) ? sh_begin->sh_size : ehdr.e_shnum;
   std::span<ElfShdr<E>> shdrs{sh_begin, (size_t)num_sections};
 
-  // e_shstrndx is a 16-bit field. If .shstrtab's section index is
-  // too large, the actual number is stored to sh_link field.
+  // e_shstrndx is a 16-bit field. If .shstrtab's section index is too large,
+  // the actual index is stored in the first section header's sh_link field.
   i64 shstrtab_idx = (ehdr.e_shstrndx == SHN_XINDEX)
     ? sh_begin->sh_link : ehdr.e_shstrndx;
 
   for (ElfShdr<E> &sec : shdrs) {
     // GCC FAT LTO objects contain both regular ELF sections and GCC-
     // specific LTO sections, so that they can be linked as LTO objects if
-    // the LTO linker plugin is available and falls back as regular
-    // objects otherwise. GCC FAT LTO object can be identified by the
-    // presence of `.gcc.lto_.symtab` section.
+    // the LTO linker plugin is available and fall back to regular
+    // objects otherwise. A GCC FAT LTO object can be identified by the
+    // presence of a `.gnu.lto_.symtab` section.
     if (has_gcc_plugin) {
       std::string_view name = data + shdrs[shstrtab_idx].sh_offset + sec.sh_name;
       if (name.starts_with(".gnu.lto_.symtab."))
@@ -44,7 +46,7 @@ static bool is_gcc_lto_obj(MappedFile *mf, bool has_gcc_plugin) {
     if (sec.sh_type != SHT_SYMTAB)
       continue;
 
-    // GCC non-FAT LTO object contains only sections symbols followed by
+    // A GCC non-FAT LTO object contains only section symbols followed by
     // a common symbol whose name is `__gnu_lto_slim` (or `__gnu_lto_v1`
     // for older GCC releases).
     std::span<ElfSym<E>> elf_syms{(ElfSym<E> *)(data + sec.sh_offset),
@@ -70,6 +72,7 @@ static bool is_gcc_lto_obj(MappedFile *mf, bool has_gcc_plugin) {
   return false;
 }
 
+// Classifies a file by its contents.
 template <typename E>
 FileType get_file_type(Context<E> &ctx, MappedFile *mf) {
   std::string_view data = mf->get_contents();
@@ -134,6 +137,8 @@ FileType get_file_type(Context<E> &ctx, MappedFile *mf) {
   return FileType::UNKNOWN;
 }
 
+// Returns the target name of an ELF file, or an empty string if its
+// machine type is not one we recognize.
 static std::string_view get_elf_type(u8 *buf) {
   bool is_le = (buf[EI_DATA] == ELFDATA2LSB);
   bool is_64 = (buf[EI_CLASS] == ELFCLASS64);
@@ -184,8 +189,8 @@ static std::string_view get_elf_type(u8 *buf) {
   }
 }
 
-// Read the beginning of a given file and returns its machine type
-// (e.g. EM_X86_64 or EM_386).
+// Reads the beginning of a given file and returns its target name
+// (e.g. "x86_64" or "i386").
 template <typename E>
 std::string_view
 get_machine_type(Context<E> &ctx, ReaderContext &rctx, MappedFile *mf) {

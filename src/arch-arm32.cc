@@ -8,9 +8,9 @@
 // ARM processors originally supported only ARM instructions. Thumb
 // instructions were later added to increase code density.
 //
-// ARM processors runs in either ARM mode or Thumb mode. The mode can
+// ARM processors run in either ARM mode or Thumb mode. The mode can
 // be switched using BX (branch and mode exchange)-family instructions.
-// We need to use that instructions to, for example, call a function
+// We need to use those instructions to, for example, call a function
 // encoded in Thumb from a function encoded in ARM. Sometimes, the
 // linker even has to emit interworking thunk code to switch mode.
 //
@@ -18,7 +18,7 @@
 // byte boundaries. So the least significant bit of a function address
 // is always 0.
 //
-// To distinguish Thumb functions from ARM fucntions, the LSB of a
+// To distinguish Thumb functions from ARM functions, the LSB of a
 // function address is repurposed as a boolean flag. If the LSB is 0,
 // the function referred to by the address is encoded in ARM;
 // otherwise, Thumb.
@@ -27,9 +27,12 @@
 // 0x2001, `foo` is a function using Thumb instructions whose address
 // is 0x2000 (not 0x2001, as Thumb instructions are always 2-byte
 // aligned). Likewise, if a function pointer has value 0x2001, it
-// refers a Thumb function at 0x2000.
+// refers to a Thumb function at 0x2000.
 //
 // https://github.com/ARM-software/abi-aa/blob/main/aaelf32/aaelf32.rst
+//
+// Relocations are of the REL type, and addends are packed into the
+// instruction fields they relocate.
 
 #if MOLD_ARM32LE || MOLD_ARM32BE
 
@@ -306,9 +309,11 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       check_range(ctx, i, val, lo, hi);
     };
 
+    // A thunk has two entry points: +0 for Thumb, +4 for ARM.
     auto get_thumb_thunk_addr = [&] { return sym.get_thunk_addr(ctx, P); };
     auto get_arm_thunk_addr   = [&] { return sym.get_thunk_addr(ctx, P) + 4; };
 
+    // The TLSDESC trampoline is the header of the next thunk.
     auto get_tlsdesc_trampoline_addr = [&] {
       auto it = ranges::upper_bound(output_section->thunks, P, {},
                                     [](std::unique_ptr<Thunk<E>> &thunk) {
@@ -326,15 +331,15 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       break;
     case R_ARM_THM_CALL: {
       if (sym.is_remaining_undef_weak()) {
-        // On ARM, calling an weak undefined symbol jumps to the
+        // On ARM, calling a weak undefined symbol jumps to the
         // next instruction.
         *(U32<E> *)loc = 0x8000'f3af; // NOP.W
         break;
       }
 
-      // THM_CALL relocation refers to either BL or BLX instruction.
-      // They are different in only one bit. We need to use BLX if the
-      // jump target is an ARM function. Otherwise, use BL.
+      // A THM_CALL relocation refers to either a BL or BLX instruction.
+      // They differ in only one bit. We need to use BLX if the jump
+      // target is an ARM function. Otherwise, we use BL.
       i64 val1 = S + A - P;
       i64 val2 = align_to(S + A - P, 4);
       bool arm = is_arm_func(ctx, sym);
@@ -370,8 +375,8 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
         break;
       }
 
-      // Just like THM_CALL, ARM_CALL relocation refers to either BL or
-      // BLX instruction. We may need to rewrite BL → BLX or BLX → BL.
+      // Just like THM_CALL, an ARM_CALL relocation refers to either a BL
+      // or BLX instruction. We may need to rewrite BL → BLX or BLX → BL.
       bool is_bl = ((*(U32<E> *)loc & 0xff00'0000) == 0xeb00'0000);
       bool is_blx = ((*(U32<E> *)loc & 0xfe00'0000) == 0xfa00'0000);
       if (!is_bl && !is_blx)
@@ -398,11 +403,11 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
         break;
       }
 
-      // These relocs refers to a B (unconditional branch) instruction.
-      // Unlike BL or BLX, we can't rewrite B to BX in place when the
-      // processor mode switch is required because BX doesn't takes an
-      // immediate; it takes only a register. So if mode switch is
-      // required, we jump to a linker-synthesized thunk which does the
+      // This relocation refers to a B (unconditional branch)
+      // instruction. Unlike BL or BLX, B can't be rewritten to BX in
+      // place when a processor mode switch is required because BX takes
+      // only a register, not an immediate. So if a mode switch is
+      // required, we jump to a linker-synthesized thunk that does the
       // job with a longer code sequence.
       i64 val = S + A - P;
       if (T || !is_int(val, 26))
@@ -672,7 +677,8 @@ template <>
 void Thunk<E>::copy_buf(Context<E> &ctx) {
   // TLS trampoline code. ARM32's TLSDESC is designed so that this
   // common piece of code is factored out from object files to reduce
-  // output size. Since no one provide, the linker has to synthesize it.
+  // output size. Since no one provides it, the linker has to synthesize
+  // it.
   constexpr ul32 hdr[] = {
     0xe08e'0000, // add r0, lr, r0
     0xe590'1004, // ldr r1, [r0, #4]
@@ -715,6 +721,11 @@ u64 get_eflags(Context<E> &ctx) {
     return EF_ARM_EABI_VER5 | EF_ARM_BE8;
 }
 
+// Replaces the .ARM.exidx output section with the synthetic
+// Arm32ExidxSection. The input .ARM.exidx sections are gathered into an
+// ordinary output section for layout, but the output is written by
+// Arm32ExidxSection, which sorts the records, appends a sentinel and
+// merges adjacent functions with identical unwind information.
 template <>
 void create_arm_exidx_section<E>(Context<E> &ctx) {
   for (i64 i = 0; i < ctx.chunks.size(); i++) {
@@ -742,7 +753,7 @@ void Arm32ExidxSection<E>::compute_section_size(Context<E> &ctx) {
 template <>
 void Arm32ExidxSection<E>::update_shdr(Context<E> &ctx) {
   // .ARM.exidx's sh_link should be set to the .text section index.
-  // Runtime doesn't care about it, but the binutils's strip command does.
+  // The runtime doesn't care about it, but binutils' strip command does.
   if (Chunk<E> *chunk = find_chunk(ctx, ".text"))
     this->shdr.sh_link = chunk->shndx;
 }
@@ -758,13 +769,13 @@ static u64 get_text_end(Context<E> &ctx) {
 
 // ARM executables use an .ARM.exidx section to look up an exception
 // handling record for the current instruction pointer. The table needs
-// to be sorted by their addresses.
+// to be sorted by address.
 //
-// Other target uses .eh_frame_hdr instead for the same purpose.
-// I don't know why only ARM uses the different mechanism, but it's
-// likely that it's due to some historical reason.
+// Other targets use .eh_frame_hdr instead for the same purpose.
+// I don't know why only ARM uses a different mechanism, but it's
+// likely due to some historical reason.
 //
-// This function returns contents of .ARM.exidx.
+// This function returns the contents of .ARM.exidx.
 template <>
 std::vector<u8> Arm32ExidxSection<E>::get_contents(Context<E> &ctx) {
   // .ARM.exidx records consists of a signed 31-bit relative address
@@ -791,7 +802,8 @@ std::vector<u8> Arm32ExidxSection<E>::get_contents(Context<E> &ctx) {
   std::vector<u8> buf(num_entries * sizeof(Entry));
   Entry *ent = (Entry *)buf.data();
 
-  // Write section contents to the buffer
+  // Write section contents to the buffer. The input sections are laid out
+  // at this section's address, which their PC-relative records depend on.
   output_section.shdr.sh_addr = this->shdr.sh_addr;
   output_section.write_to(ctx, buf.data());
 
@@ -834,6 +846,8 @@ std::vector<u8> Arm32ExidxSection<E>::get_contents(Context<E> &ctx) {
   return buf;
 }
 
+// Once addresses are known, merges the records of adjacent functions
+// with the same unwind information, which shrinks the section.
 template <>
 void Arm32ExidxSection<E>::remove_duplicate_entries(Context<E> &ctx) {
   this->shdr.sh_size = get_contents(ctx).size();
@@ -855,9 +869,14 @@ void Arm32ExidxSection<E>::copy_buf(Context<E> &ctx) {
 //
 // A tricky thing is that instructions in an object file are always
 // big-endian if the file is compiled for big-endian mode. In other words,
-// the compiler always emit code in BE32 if -mbig-endian is specified. It
+// the compiler always emits code in BE32 if -mbig-endian is specified. It
 // is the linker's responsibility to rewrite instructions from big-endian
-// to little-endian for an BE8 output. This function does that.
+// to little-endian for a BE8 output. This function does that.
+//
+// Relocations are therefore applied in the object files' byte order, and
+// code in input sections is converted to little-endian only after it's
+// copied to the output. Linker-synthesized code such as PLT entries and
+// thunks is written in little-endian form to begin with.
 //
 // The text section may contain a mix of 32-bit ARM instructions, 16-bit
 // Thumb instructions, and data. We need to distinguish them to swap 4

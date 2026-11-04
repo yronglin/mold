@@ -16,6 +16,9 @@
 // implement GD → LE relaxation.
 //
 // https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst
+//
+// Instructions are little-endian even on big-endian targets, where only
+// data is byte-swapped.
 
 #if MOLD_ARM64LE || MOLD_ARM64BE
 
@@ -33,6 +36,7 @@ static void write_adr(u8 *buf, u64 val) {
   *(ul32 *)buf |= (bits(val, 1, 0) << 29) | (bits(val, 20, 2) << 5);
 }
 
+// Rewrites a MOV to MOVZ or MOVN, whichever represents `val`.
 static void write_movn_movz(u8 *buf, i64 val) {
   *(ul32 *)buf &= 0b0000'0000'0110'0000'0000'0000'0001'1111;
 

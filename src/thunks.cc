@@ -1,19 +1,25 @@
 // RISC instructions are usually up to 4 bytes long, so the immediates of
-// their branch instructions are naturally smaller than 32 bits.  This is
-// contrary to x86-64 on which branch instructions take 4 bytes immediates
-// and can jump to anywhere within PC ± 2 GiB.
+// their branch instructions are naturally smaller than 32 bits. This is
+// unlike x86-64, whose branch instructions take 4-byte immediates and can
+// jump anywhere within PC ± 2 GiB.
 //
-// In fact, ARM32's branch instructions can jump only within ±16 MiB and
-// ARM64's ±128 MiB, for example. If a branch target is further than that,
+// For example, ARM32's branch instructions can jump only within ±16 MiB
+// and ARM64's within ±128 MiB. If a branch target is further than that,
 // we need to let it branch to a linker-synthesized code sequence that
-// construct a full 32 bit address in a register and jump there. That
-// linker-synthesized code is called "thunk".
+// constructs a full 32-bit address in a register and jumps there. That
+// linker-synthesized code is called a "thunk".
 //
 // The function in this file creates thunks.
 //
 // Thunk size varies widely across programs. In an ARM64 build of Clang 16,
 // thunks occupy about 30 KiB (0.01%) of a ~300 MiB text section, compared
 // with about 12.5 MiB (2.5%) of a ~500 MiB text section in TensorFlow.
+//
+// Thunks are created in two passes. Before addresses are known, every
+// out-of-section call is pessimistically assumed to need a thunk; once
+// the layout is fixed, the entries that turned out to be unneeded are
+// removed. Sections only shrink in the second pass, so no existing
+// reference to a thunk goes out of range because of it.
 
 #if MOLD_ARM32LE || MOLD_ARM32BE || MOLD_ARM64LE || MOLD_ARM64BE || \
     MOLD_PPC32 || MOLD_PPC64V1 || MOLD_PPC64V2
@@ -37,9 +43,12 @@ static constexpr i64 batch_size =
 static constexpr i64 max_thunk_size = batch_size / 2;
 
 // Power10 prefixed instructions must not cross a 64-byte boundary.
-// Aligning each thunk group to a 8-byte boundary guarantees that.
+// Aligning each thunk group to an 8-byte boundary guarantees that.
 static constexpr i64 thunk_align = 8;
 
+// Returns true if a call needs a thunk. On the first pass, before
+// addresses are known, every call out of the section is assumed to need
+// one.
 template <typename E>
 static bool
 requires_thunk(Context<E> &ctx, InputSection<E> &isec, const ElfRel<E> &rel,
@@ -56,11 +65,11 @@ requires_thunk(Context<E> &ctx, InputSection<E> &isec, const ElfRel<E> &rel,
       return true;
 
     // If the target section is in the same output section but
-    // hasn't got any address yet, that's unreacahble.
+    // hasn't been assigned an address yet, it's unreachable.
     if (isec2->offset == -1)
       return true;
 
-    // Even if the target is the same section, we branch to its PLT
+    // Even if the target is in the same section, we branch to its PLT
     // if it has one. So a symbol with a PLT is also considered an
     // out-of-section reference.
     if (sym.has_plt(ctx))
@@ -81,16 +90,16 @@ requires_thunk(Context<E> &ctx, InputSection<E> &isec, const ElfRel<E> &rel,
     if (sym.has_plt(ctx))
       return true;
 
-  // PowerPC before Power9 lacks PC-relative load/store instructions.
+  // PowerPC before Power10 lacks PC-relative load/store instructions.
   // Functions compiled for Power9 or earlier assume that r2 points to
-  // GOT+0x8000, while those for Power10 uses r2 as a scratch register.
+  // GOT+0x8000, while those for Power10 use r2 as a scratch register.
   // We need a thunk to recompute r2 for interworking.
   if constexpr (is_ppc64v2<E>)
     if ((rel.r_type == R_PPC64_REL24 && !sym.esym().ppc64_preserves_r2()) ||
         (rel.r_type == R_PPC64_REL24_NOTOC && sym.esym().ppc64_uses_toc()))
       return true;
 
-  // Compute a distance between the relocated place and the symbol
+  // Compute the distance between the relocated place and the symbol
   // and check if they are within reach.
   i64 S = sym.get_addr(ctx, NO_OPD);
   i64 A = get_addend(isec, rel);
@@ -99,6 +108,10 @@ requires_thunk(Context<E> &ctx, InputSection<E> &isec, const ElfRel<E> &rel,
   return val < -branch_distance<E> || branch_distance<E> <= val;
 }
 
+// Computes the entry offsets of a thunk, followed by its size, assuming
+// that every entry takes the maximum size. They can be computed before
+// addresses are known, and they are upper bounds of the actual ones, so a
+// thunk only shrinks once shrink_size() computes its actual layout.
 template <>
 void Thunk<E>::compute_size() {
   offsets.clear();
@@ -126,7 +139,7 @@ void OutputSection<E>::create_range_extension_thunks(Context<E> &ctx) {
   //
   // Input sections between B and C are the current batch.
   //
-  // A is the input section with the smallest address than can reach
+  // A is the input section with the smallest address that can be reached
   // from the current batch.
   //
   // D is the input section with the largest address such that the thunk
@@ -149,7 +162,7 @@ void OutputSection<E>::create_range_extension_thunks(Context<E> &ctx) {
   i64 t = 0;
 
   while (b < m.size()) {
-    // Move D foward as far as we can jump from B to a thunk at D.
+    // Move D forward as far as we can jump from B to a thunk at D.
     auto d_thunk_end = [&] {
       u64 d_end = align_to(offset, 1 << m[d]->p2align) + m[d]->sh_size;
       return align_to(d_end, thunk_align) + max_thunk_size;
@@ -212,7 +225,7 @@ void OutputSection<E>::create_range_extension_thunks(Context<E> &ctx) {
     assert(thunk.size() < max_thunk_size);
     offset += thunk.size();
 
-    // Move B forward to point to the begining of the next batch.
+    // Move B forward to point to the beginning of the next batch.
     b = c;
   }
 

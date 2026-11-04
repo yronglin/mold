@@ -1,13 +1,13 @@
 // RISC-V is a clean RISC ISA. It supports PC-relative load/store for
 // position-independent code. Its 32-bit and 64-bit ISAs are almost
-// identical. That is, you can think RV32 as a RV64 without 64-bit
+// identical. That is, you can think of RV32 as an RV64 without 64-bit
 // operations. In this file, we support both RV64 and RV32.
 //
 // RISC-V is essentially little-endian, but the big-endian version is
 // available as an extension. GCC supports `-mbig-endian` to generate
 // big-endian code. Even in big-endian mode, machine instructions are
 // defined to be encoded in little-endian, though. Only the behavior of
-// load/store instructions are different between LE RISC-V and BE RISC-V.
+// load/store instructions is different between LE RISC-V and BE RISC-V.
 //
 // From the linker's point of view, the RISC-V's psABI is unique because
 // sections in input object files can be shrunk while being copied to the
@@ -47,10 +47,10 @@ static void write_utype(u8 *loc, u32 val) {
   *(ul32 *)loc &= 0b000000'00000'00000'000'11111'1111111;
 
   // U-type instructions are used in combination with I-type
-  // instructions. U-type insn sets an immediate to the upper 20-bits
-  // of a register. I-type insn sign-extends a 12-bits immediate and
-  // adds it to a register value to construct a complete value. 0x800
-  // is added here to compensate for the sign-extension.
+  // instructions. A U-type instruction sets an immediate to the upper
+  // 20 bits of a register. An I-type instruction sign-extends a 12-bit
+  // immediate and adds it to a register value to construct a complete
+  // value. 0x800 is added here to compensate for the sign extension.
   *(ul32 *)loc |= (val + 0x800) & 0xffff'f000;
 }
 
@@ -206,11 +206,12 @@ void EhFrameSection<E>::apply_eh_reloc(Context<E> &ctx, InputSection<E> &isec,
   }
 }
 
-// RISC-V generally uses the AUIPC + ADDI/LW/SW/etc instruction pair
-// to access the AUIPC's address ± 2 GiB. AUIPC materializes the most
-// significant 52 bits in a PC-relative manner, and the following
-// instruction specifies the remaining least significant 12 bits.
-// There are several HI20 and LO12 relocation types for them.
+// RISC-V generally uses the AUIPC + ADDI/LW/SW/etc. instruction pair
+// to access anywhere within the AUIPC's address ± 2 GiB. AUIPC
+// materializes the most significant 52 bits in a PC-relative manner,
+// and the following instruction specifies the remaining least
+// significant 12 bits. There are several HI20 and LO12 relocation
+// types for them.
 //
 // LO12 relocations need to materialize an address relative to AUIPC's
 // address, not relative to the instruction that the relocation
@@ -250,7 +251,7 @@ find_paired_reloc(Context<E> &ctx, InputSection<E> &isec,
 }
 
 // Returns true if isec's i'th relocation refers to the following
-// GOT-load instructioon pair, which is an expeanded form of
+// GOT-load instruction pair, which is an expanded form of the
 // `la t0, foo` pseudo assembly instruction.
 //
 // .L0
@@ -467,9 +468,9 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       else
         write_stype(loc, S + A);
 
-      // Rewrite `lw t1, 0(t0)` with `lw t1, 0(x0)` if the address is
-      // accessible relative to the zero register because if that's the
-      // case, corresponding LUI might have been removed by relaxation.
+      // Rewrite `lw t1, 0(t0)` as `lw t1, 0(x0)` if the address is
+      // accessible relative to the zero register, because in that case
+      // the corresponding LUI might have been removed by relaxation.
       if (is_int(S + A, 12))
         set_rs1(loc, 0);
       break;
@@ -483,8 +484,7 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       break;
     case R_RISCV_TPREL_ADD:
       // This relocation just annotates an ADD instruction that can be
-      // removed when a TPREL is relaxed. No value is needed to be
-      // written.
+      // removed when a TPREL is relaxed. No value needs to be written.
       assert(removed_bytes == 0 || removed_bytes == 4);
       if (removed_bytes)
         rewrite(i, R_NONE);
@@ -907,6 +907,7 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
     const ElfRel<E> &r = rels[i];
     Symbol<E> &sym = *isec.file->symbols[r.r_sym];
 
+    // Records that `d` bytes are removed at relocation `r`.
     auto remove = [&](i64 d) {
       r_delta += d;
       deltas.push_back(RelocDelta{r.r_offset, r_delta});
@@ -949,9 +950,9 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
     switch (r.r_type) {
     case R_RISCV_CALL:
     case R_RISCV_CALL_PLT: {
-      // These relocations refer to an AUIPC + JALR instruction pair to
-      // allow to jump to anywhere in PC ± 2 GiB. If the jump target is
-      // close enough to PC, we can use C.J, C.JAL or JAL instead.
+      // These relocations refer to an AUIPC + JALR instruction pair that
+      // can jump to anywhere in PC ± 2 GiB. If the jump target is close
+      // enough to PC, we can use C.J, C.JAL or JAL instead.
       i64 dist = compute_distance(ctx, sym, isec, r);
       if (dist & 1)
         break;
@@ -964,7 +965,8 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
         remove(6);
       } else if (use_rvc && !E::is_64 && rd == 1 && is_int(dist, 12)) {
         // If rd is x1 and the jump target is within ±2 KiB, we can use
-        // C.JAL. This is RV32 only because C.JAL is RV32-only instruction.
+        // C.JAL. This is RV32 only because C.JAL is an RV32-only
+        // instruction.
         remove(6);
       } else if (is_int(dist, 21)) {
         // If the jump target is within ±1 MiB, we can use JAL.
@@ -993,9 +995,9 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
       i64 rd = get_rd(buf + r.r_offset);
 
       if (is_int(val, 12)) {
-        // We can replace `lui t0, %hi(foo)` and `add t0, t0, %lo(foo)`
-        // instruction pair with `add t0, x0, %lo(foo)` if foo's bits
-        // [32:11] are all one or all zero.
+        // We can replace the `lui t0, %hi(foo)` and `addi t0, t0, %lo(foo)`
+        // instruction pair with `addi t0, x0, %lo(foo)` if foo's bits
+        // [63:11] are all ones or all zeros.
         remove(4);
       } else if (use_rvc && rd != 0 && rd != 2 && is_int(val + 0x800, 18)) {
         // If the upper 20 bits can actually be represented in 6 bits,
@@ -1007,7 +1009,7 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
     case R_RISCV_TPREL_HI20:
     case R_RISCV_TPREL_ADD:
       // These relocations are used to add a high 20-bit value to the
-      // thread pointer. The following two instructions materializes
+      // thread pointer. The following two instructions materialize
       // TP + %tprel_hi20(foo) in %t0, for example.
       //
       //  lui  t0, %tprel_hi(foo)         # R_RISCV_TPREL_HI20
@@ -1087,7 +1089,7 @@ void shrink_section(Context<E> &ctx, InputSection<E> &isec) {
 // In order to guarantee string uniqueness, extensions have to be ordered
 // in a specific manner. The exact rule is unfortunately a bit complicated.
 //
-// The following functions takes care of ISA strings.
+// The following functions take care of ISA strings.
 
 namespace {
 struct Extn {
@@ -1129,6 +1131,10 @@ static bool extn_name_less(std::string_view x, std::string_view y) {
   return std::tuple{get_rank(x), x} < std::tuple{get_rank(y), y};
 }
 
+// Parses an ISA string into its extensions. Each element is a name
+// (letters and digits, starting and ending with a letter) followed by
+// `<major>p<minor>`; elements are separated by underscores. Returns an
+// empty vector if the string is malformed.
 static std::vector<Extn> parse_arch_string(std::string_view str) {
   auto flags = std::regex_constants::optimize | std::regex_constants::ECMAScript;
   static std::regex re(R"(^([a-z]|[a-z][a-z0-9]*[a-z])(\d+)p(\d+)(_|$))", flags);

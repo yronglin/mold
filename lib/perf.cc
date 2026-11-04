@@ -1,3 +1,5 @@
+// Statistics counters and wall-clock and CPU time accounting.
+
 #include "lib.h"
 
 #include <functional>
@@ -91,6 +93,8 @@ void print_timer_records(
   for (i64 i = records.size() - 1; i >= 0; i--)
     records[i]->stop();
 
+  // Infer implicit parents from complete intervals. Overlapping timers
+  // need not be nested, and explicitly named parents take precedence.
   for (i64 i = 0; i < records.size(); i++) {
     TimerRecord &inner = *records[i];
     if (inner.parent)

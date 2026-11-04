@@ -98,21 +98,28 @@
 namespace mold {
 
 // Global variables
-// We store LTO-related information to global variables,
+// We store LTO-related information in global variables,
 // as the LTO plugin is not thread-safe by design anyway.
 
 template <typename E> static Context<E> *gctx;
 template <typename E> static std::vector<ObjectFile<E> *> lto_objects;
 
 static int phase = 0;
+
+// The plugin hands back the symbols of the file being claimed through
+// this vector.
 static std::vector<PluginSymbol> plugin_symbols;
 static ClaimFileHandler *claim_file_hook;
 static AllSymbolsReadHandler *all_symbols_read_hook;
 static CleanupHandler *cleanup_hook;
+
+// True if the plugin speaks the GCC linker API v1, and hence supports
+// `get_symbols_v3`.
 static bool is_gcc_linker_api_v1 = false;
 
 // Event handlers
 
+// The printf-like diagnostics callback.
 template <typename E>
 static PluginStatus message(PluginLevel level, const char *fmt, ...) {
   LOG << "message\n";
@@ -169,6 +176,7 @@ add_symbols(void *handle, int nsyms, const PluginSymbol *psyms) {
   return LDPS_OK;
 }
 
+// Receives an object file the plugin compiled.
 template <typename E>
 static PluginStatus add_input_file(const char *path) {
   LOG << "add_input_file: " << path << "\n";
@@ -273,7 +281,7 @@ get_symbols_v1(const void *handle, int nsyms, PluginSymbol *psyms) {
   unreachable();
 }
 
-// get_symbols teaches the LTO plugin as to how we have resolved symbols.
+// get_symbols tells the LTO plugin how we have resolved symbols.
 // The plugin uses the symbol resolution info to optimize the program.
 //
 // For example, if a definition in an IR file is not referenced by
@@ -287,9 +295,8 @@ get_symbols(const void *handle, int nsyms, PluginSymbol *psyms, bool is_v2) {
   ObjectFile<E> &file = *(ObjectFile<E> *)handle;
   assert(file.is_lto_input);
 
-  // If file is an archive member which was not chose to be included in
-  // to the final result, we need to make the plugin to ignore all
-  // symbols.
+  // If the file is an archive member that was not chosen to be included
+  // in the final result, we need to make the plugin ignore all symbols.
   if (!file.is_reachable) {
     assert(!is_v2);
     for (int i = 0; i < nsyms; i++)
@@ -317,7 +324,7 @@ get_symbols(const void *handle, int nsyms, PluginSymbol *psyms, bool is_v2) {
     return esym.is_undef() ? LDPR_RESOLVED_EXEC : LDPR_PREEMPTED_REG;
   };
 
-  // Set the symbol resolution results to psyms.
+  // Store the symbol resolution results in psyms.
   for (i64 i = 0; i < nsyms; i++) {
     ElfSym<E> &esym = file.elf_syms[i + 1];
     Symbol<E> &sym = *file.symbols[i + 1];
@@ -333,13 +340,14 @@ get_symbols(const void *handle, int nsyms, PluginSymbol *psyms, bool is_v2) {
 // get_symbols_v1 and get_symbols_v2 don't provide a way to ignore an
 // object file we previously passed to the linker plugin. So we can't
 // "unload" object files in archives that we ended up not choosing to
-// include into the final output.
+// include in the final output.
 //
 // As a workaround, we restart the linker with a list of object files
 // the linker has to ignore, so that it won't read the object files
 // from archives next time.
 //
-// This is an ugly hack and should be removed once GCC adopts the v3 API.
+// This is an ugly hack and should be removed once we drop support for
+// GCC versions older than 12.
 template <typename E>
 static void restart_process(Context<E> &ctx) {
   std::vector<const char *> args;
@@ -460,6 +468,7 @@ static void load_lto_plugin(Context<E> &ctx) {
     Fatal(ctx) << "failed to load plugin " << ctx.arg.plugin << ": "
                << dlerror();
 
+  // Strings in the transfer vector must outlive the plugin.
   auto save = [&](std::string_view str) {
     return save_string(ctx, std::string(str).c_str()).data();
   };
@@ -513,6 +522,8 @@ static void load_lto_plugin(Context<E> &ctx) {
   assert(status == LDPS_OK);
 }
 
+// Converts an IR symbol to an ELF symbol. Definitions are absolute,
+// since an IR object has no sections.
 template <typename E>
 static ElfSym<E> to_elf_sym(PluginSymbol &psym) {
   ElfSym<E> esym;
@@ -563,8 +574,8 @@ static ElfSym<E> to_elf_sym(PluginSymbol &psym) {
   return esym;
 }
 
-// Returns true if a given linker plugin looks like LLVM's one.
-// Returns false if it's GCC.
+// Returns true if a given linker plugin looks like LLVM's.
+// Returns false if it's GCC's.
 template <typename E>
 static bool is_llvm(Context<E> &ctx) {
   return ctx.arg.plugin.find("LLVMgold.") != ctx.arg.plugin.npos;
@@ -577,6 +588,8 @@ static bool supports_v3_api(Context<E> &ctx) {
   return is_gcc_linker_api_v1 || is_llvm(ctx);
 }
 
+// Describes a file to the plugin, which reads it through a file
+// descriptor, at an offset for an archive member.
 template <typename E>
 static PluginInputFile
 create_plugin_input_file(Context<E> &ctx, MappedFile *mf) {
@@ -596,6 +609,8 @@ create_plugin_input_file(Context<E> &ctx, MappedFile *mf) {
   return file;
 }
 
+// Reads the symbols of an IR object through the plugin. Returns nullptr
+// for an archive member the plugin declines.
 template <typename E>
 ObjectFile<E> *read_lto_object(Context<E> &ctx, MappedFile *mf) {
   if (ctx.arg.plugin.empty())
@@ -681,6 +696,9 @@ ObjectFile<E> *read_lto_object(Context<E> &ctx, MappedFile *mf) {
 }
 
 // Entry point
+//
+// Has the plugin compile the IR objects and returns the resulting object
+// files.
 template <typename E>
 std::vector<ObjectFile<E> *> run_lto_plugin(Context<E> &ctx) {
   Timer t(ctx, "run_lto_plugin");
@@ -705,7 +723,7 @@ std::vector<ObjectFile<E> *> run_lto_plugin(Context<E> &ctx) {
     }
   });
 
-  // Symbols specified by the --wrap option needs to be visible from
+  // Symbols specified by the --wrap option need to be visible from
   // regular object files.
   for (std::string_view name : ctx.arg.wrap) {
     get_symbol(ctx, name)->referenced_by_regular_obj = true;
@@ -722,8 +740,8 @@ std::vector<ObjectFile<E> *> run_lto_plugin(Context<E> &ctx) {
     sym->referenced_by_regular_obj = true;
 
   // Object files containing .gnu.offload_lto_.* sections need to be
-  // given to the LTO backend. Such sections contains code and data for
-  // peripherails (typically GPUs).
+  // given to the LTO backend. Such sections contain code and data for
+  // peripherals (typically GPUs).
   for (ObjectFile<E> *file : ctx.objs) {
     if (file->is_reachable && !file->is_lto_input && file->is_gcc_offload_obj) {
       PluginInputFile pfile = create_plugin_input_file(ctx, file->mf);
@@ -741,6 +759,7 @@ std::vector<ObjectFile<E> *> run_lto_plugin(Context<E> &ctx) {
   return lto_objects<E>;
 }
 
+// Lets the plugin remove its temporary files.
 template <typename E>
 void lto_cleanup(Context<E> &ctx) {
   Timer t(ctx, "lto_cleanup");
