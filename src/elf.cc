@@ -3,6 +3,9 @@
 
 namespace mold {
 
+// rel_to_string<E>() returns the name of a relocation type for the target
+// E for use in diagnostics. A type unknown to us is formatted as its
+// hexadecimal value.
 static std::string unknown_type(u32 r_type) {
   std::stringstream ss;
   ss << "unknown (0x" << std::hex << r_type << ")";

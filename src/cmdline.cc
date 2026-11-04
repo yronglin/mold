@@ -411,6 +411,8 @@ static i64 parse_hex(Context<E> &ctx, std::string opt, std::string_view value) {
   return std::stoul(m[1], nullptr, 16);
 }
 
+// Parses an integer in C syntax (decimal, `0x` hex or leading-zero octal),
+// optionally preceded by a minus sign.
 template <typename E>
 static i64 parse_number(Context<E> &ctx, std::string opt,
                         std::string_view value) {
@@ -452,6 +454,7 @@ static std::vector<u8> parse_hex_build_id(Context<E> &ctx, std::string_view arg)
   return vec;
 }
 
+// The argument is arbitrary bytes with `%XX` escapes.
 template <typename E>
 static std::string
 parse_package_metadata(Context<E> &ctx, std::string_view arg) {
@@ -606,7 +609,7 @@ parse_kernel_version(std::string str) {
   return {std::stoi(m[1]), std::stoi(m[2]), std::stoi(m[3])};
 }
 
-// Version 6.11 and 6.12 of the Linux kernel does not return ETXTBSY for
+// Versions 6.11 and 6.12 of the Linux kernel do not return ETXTBSY for
 // open(2) on an executable file that is currently running. This function
 // returns true if we are running on a Linux kernel older than 6.11 or newer
 // than 6.12.
@@ -647,6 +650,7 @@ std::vector<ReaderJob> parse_nonpositional_args(Context<E> &ctx) {
   std::optional<bool> z_relro;
   std::optional<bool> z_dynamic_undefined_weak;
   std::optional<std::string> separate_debug_file;
+  // An explicit seed survives intervening --reverse-sections options.
   std::optional<u64> shuffle_sections_seed;
   std::unordered_set<std::string_view> rpaths;
   std::vector<std::string_view> version_scripts;
@@ -661,15 +665,15 @@ std::vector<ReaderJob> parse_nonpositional_args(Context<E> &ctx) {
 
   // We generally don't need to write addends to relocated places if the
   // relocation type is RELA because RELA records contain addends.
-  // However, there are too much code that wrongly assumes that addends
+  // However, there is too much code that wrongly assumes that addends
   // are written to both RELA records and relocated places, so we write
   // addends to relocated places by default. There are a few exceptions:
   //
-  // - It looks like the SPARC's dynamic linker takes both RELA's r_addend
+  // - It looks like SPARC's dynamic linker takes both RELA's r_addend
   //   and the value at the relocated place. So we don't want to write
   //   values to relocated places.
   //
-  // - Static PIE binaries crash on startup in some RISC-V environment if
+  // - Static PIE binaries crash on startup in some RISC-V environments if
   //   we write addends to relocated places.
   ctx.arg.apply_dynamic_relocs = !is_sparc<E> && !is_riscv<E>;
 
@@ -933,6 +937,7 @@ std::vector<ReaderJob> parse_nonpositional_args(Context<E> &ctx) {
     } else if (read_flag("noinhibit-exec")) {
       ctx.arg.noinhibit_exec = true;
     } else if (read_flag("shuffle-sections")) {
+      // Resolve the seed after parsing all options.
       ctx.arg.shuffle_sections = SHUFFLE_SECTIONS_SHUFFLE;
     } else if (read_eq("shuffle-sections")) {
       ctx.arg.shuffle_sections = SHUFFLE_SECTIONS_SHUFFLE;
@@ -1701,7 +1706,7 @@ std::vector<ReaderJob> parse_nonpositional_args(Context<E> &ctx) {
   if (ctx.arg.shared && warn_shared_textrel)
     ctx.arg.warn_textrel = true;
 
-  // We don't want the background process to write to stdout
+  // We don't want the background process to write to stdout.
   if (ctx.arg.stats || ctx.arg.perf)
     ctx.arg.detach = false;
 
@@ -1714,12 +1719,12 @@ std::vector<ReaderJob> parse_nonpositional_args(Context<E> &ctx) {
   }
 
   // --oformat=binary implies --strip-all because without a section
-  // header, there's no way to identify the locations of a symbol
+  // header, there's no way to identify the location of a symbol
   // table in an output file in the first place.
   if (ctx.arg.oformat_binary)
     ctx.arg.strip_all = true;
 
-  // By default, mold tries to ovewrite to an output file if exists
+  // By default, mold tries to overwrite an output file if it exists
   // because at least on Linux, writing to an existing file is much
   // faster than creating a fresh file and writing to it.
   //

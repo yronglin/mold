@@ -2,26 +2,26 @@
 // TLS is probably the most obscure feature the linker has to support,
 // so I'll explain it in detail in this comment.
 //
-// TLS is a per-thread storage. Thread-local variables (TLVs) are in a TLS
-// so that each thread has its own set of thread-local variables. Taking
-// an address of a TLV returns a unique value for each thread. For example,
+// TLS is per-thread storage. Thread-local variables (TLVs) are in TLS so
+// that each thread has its own set of thread-local variables. Taking the
+// address of a TLV returns a unique value for each thread. For example,
 // `&foo` for the following code returns different pointer values for
 // different threads.
 //
 //   thread_local int foo;
 //
-// TLV is a relatively new feature. C for example didn't provide the
-// official support for it through the keyword `thread_local` until C11.
-// TLV needs a coordination between the compiler, the linker and the
-// runtime to work correctly.
+// TLV is a relatively new feature. C, for example, didn't officially
+// support it until C11 added the keyword `_Thread_local`. TLVs need
+// coordination between the compiler, the linker and the runtime to work
+// correctly.
 //
-// An ELF exectuable or a shared library using TLV contains a "TLS template
-// image" in the PT_TLS segment. For each newly created thread including the
-// initial one, the runtime allocates a contiguous memory for an executable
-// and its depending shared libraries and copies template images there. That
-// per-thread memory is called the "initial TLS block". After allocating and
-// initializing the initial TLS block, the runtime sets a register to refer
-// to the initial TLS block, so that the thread-local variables are
+// An ELF executable or a shared library using TLVs contains a "TLS template
+// image" in the PT_TLS segment. For each newly created thread, including the
+// initial one, the runtime allocates contiguous memory for an executable and
+// the shared libraries it depends on, and copies the template images there.
+// That per-thread memory is called the "initial TLS block". After allocating
+// and initializing the initial TLS block, the runtime sets a register to
+// refer to the initial TLS block, so that the thread-local variables are
 // accessible relative to the register.
 //
 // The register referring to the per-thread storage is called the Thread
@@ -33,17 +33,17 @@
 // for new threads, and no one writes to it at runtime.
 //
 // Now, let's think about how to access a TLV. We need to know the TLV's
-// address to access it which can be done in several different ways as
-// follows:
+// address to access it. There are several different ways to obtain the
+// address as follows:
 //
 //  1. If we are creating an executable, we know the exact size of the TLS
 //     template image we are creating, and we know where the TP will be set
 //     to after the template is copied to the initial TLS block. Therefore,
 //     the TP-relative address of a TLV in the main executable is known at
-//     link-time. That means, computing a TLV's address can be as easy as
+//     link-time. That means computing a TLV's address can be as easy as
 //     `add %dst, %tp, <link-time constant>`.
 //
-//  2. If we are creating a shared library, we don't exactly know where
+//  2. If we are creating a shared library, we don't know exactly where
 //     its TLS template image will be copied to in terms of the
 //     TP-relative address, because we don't know how large the main
 //     executable's and other libraries' TLS template images are. Only the
@@ -52,7 +52,7 @@
 //     We can solve the problem with an indirection. Specifically, for
 //     each TLV whose TP-relative address is known only at process startup
 //     time, we create a GOT entry to store its TP-relative address. We
-//     then emit a dynamic relocation to let the runtime to fill the GOT
+//     then emit a dynamic relocation to let the runtime fill the GOT
 //     entry with a TP-relative address.
 //
 //     Computing a TLV address in this scheme needs at least two machine
@@ -60,17 +60,17 @@
 //     the GOT entry, and the second one adds the loaded value to TP.
 //
 //  3. Now, think about libraries that are dynamically loaded with dlopen.
-//     The TLS block for such library may not be allocated next to the
+//     The TLS block for such a library may not be allocated next to the
 //     initial TLS block, so we can have two or more discontiguous TLS
-//     blocks. There's no easy formula to compute an address of a TLV in a
+//     blocks. There's no easy formula to compute the address of a TLV in a
 //     separate TLS block.
 //
 //     The address of a TLV in a separate TLS block can be obtained by
 //     calling the libc-provided function, __tls_get_addr(). The function
-//     takes two arguments; a module ID to identify the ELF file and the
-//     TLV's offset within the ELF file's TLS template image. Accessing a
-//     TLV is sometimes compiled to a function call! The module ID and the
-//     offset are usually stored to GOT as two consecutive words.
+//     takes a pointer to two consecutive words, a module ID to identify
+//     the ELF file and the TLV's offset within the ELF file's TLS template
+//     image. Accessing a TLV is sometimes compiled to a function call! The
+//     two words are usually stored in the GOT.
 //
 // 1) is called the Local Exec access model. 2) is Initial Exec, and 3) is
 // General Dynamic.
@@ -79,10 +79,9 @@
 // TLVs are in the same ELF file (usually in the same file as the code is).
 // In this case, we can call __tls_get_addr() only once with the module ID
 // and the offset 0 to obtain the base address of the ELF file's TLS block.
-// The base address obtained this way is sometimes called Dynamic Thread
-// Pointer or DTP. We can then compute TLVs' addresses by adding their
-// DTP-relative addresses to DTP. This access model is called the Local
-// Dynamic.
+// The base address obtained this way is sometimes called the Dynamic Thread
+// Pointer, or DTP. We can then compute TLVs' addresses by adding their
+// DTP-relative addresses to DTP. This access model is called Local Dynamic.
 //
 // The compiler tries to emit the most efficient code for a TLV access based
 // on compiler command line options and TLV properties as follows:
@@ -99,12 +98,12 @@
 //     shared library. In this case, Initial Exec is used to access the
 //     variable.
 //
-//  3. If -fPIC is given, it may be compiling code for dlopen'able shared
+//  3. If -fPIC is given, it may be compiling code for a dlopen'able shared
 //     library. In this case, Local Dynamic or General Dynamic is used to
 //     access TLVs.
 //
 // You can also manually control how the compiler emits TLV access code
-// globally with `-ftls-model=<model-name>` or per-variable basis with
+// globally with `-ftls-model=<model-name>` or on a per-variable basis with
 // `__attribute__((tls_model(<model-name>)))`. For example, if you are
 // building a shared library that you have no plan to use with dlopen(), you
 // may want to compile the source files with `-ftls-model=initial-exec` to
@@ -124,7 +123,7 @@
 //
 // For a TLV compiled with TLSDESC, we allocate two consecutive GOT slots
 // and create a TLSDESC dynamic relocation for them. The dynamic linker
-// sets a function pointer to the first GOT slot and its argument to the
+// stores a function pointer in the first GOT slot and its argument in the
 // second slot.
 //
 // To access the TLV, we call the function pointer with the argument we
@@ -132,17 +131,18 @@
 // TP-relative address.
 //
 // The runtime chooses the best access method depending on the situation
-// and sets a pointer to the most efficient code to the first GOT slot.
+// and stores a pointer to the most efficient code in the first GOT slot.
 // For example, if a TLV's TP-relative address is known at process startup
-// time, the runtime sets that address to the second GOT slot and set a
-// function that just returns its argument to the first GOT slot.
+// time, the runtime stores that address in the second GOT slot and a
+// pointer to a function that just returns its argument in the first GOT
+// slot.
 //
-// With TLSDECS, the compiler can always emit the same code for TLVs
+// With TLSDESC, the compiler can always emit the same code for TLVs
 // without sacrificing runtime performance.
 //
 // TLSDESC is better than the traditional, non-TLSDESC TLS access models.
 // It's the default on ARM64, but on other targets, TLSDESC is
-// unfortunately either optional or even not supported at all. So we still
+// unfortunately either optional or not supported at all. So we still
 // need to support both the traditional TLS models and the TLSDESC model.
 
 #include "mold.h"
@@ -150,9 +150,9 @@
 namespace mold {
 
 // Returns the TP address which can be used for efficient TLV accesses in
-// the main executable. TP at runtime refers to a per-process TLS block
-// whose address is not known at link-time. So the address returned from
-// this function is the TP if the TLS template image were a TLS block.
+// the main executable. TP at runtime refers to a per-thread TLS block
+// whose address is not known at link-time. So this function returns the
+// address TP would refer to if the TLS template image were a TLS block.
 template <typename E>
 u64 get_tp_addr(const ElfPhdr<E> &phdr) {
   assert(phdr.p_type == PT_TLS);
@@ -163,9 +163,9 @@ u64 get_tp_addr(const ElfPhdr<E> &phdr) {
     // historical reasons. TLVs are accessed with negative offsets from TP.
     return align_to(phdr.p_vaddr + phdr.p_memsz, phdr.p_align);
   } else if constexpr (is_arm<E> || is_sh4<E>) {
-    // On ARM and SH4, the runtime appends two words at the beginning
-    // of TLV template image when copying TLVs to the TLS block, so we need
-    // to offset it.
+    // On ARM and SH4, the runtime inserts two words before the TLS
+    // template image when copying TLVs to the TLS block, so we need to
+    // offset it.
     return align_down(phdr.p_vaddr - sizeof(Word<E>) * 2, phdr.p_align);
   } else if constexpr (is_ppc<E> || is_m68k<E>) {
     // On PowerPC and m68k, TP is 0x7000 (28 KiB) past the beginning

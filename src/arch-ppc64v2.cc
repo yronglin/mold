@@ -4,7 +4,7 @@
 // with "ppc64" which refers to the original, big-endian PowerPC systems.
 //
 // PPC64 is a bit tricky to support because PC-relative load/store
-// instructions hadn't been available until Power10 which debuted in 2021.
+// instructions weren't available until Power10, which debuted in 2021.
 // Prior to Power10, it wasn't trivial for position-independent code (PIC)
 // to load a value from, for example, .got, as we can't do that with [PC +
 // the offset to the .got entry].
@@ -23,7 +23,7 @@
 //   mflr  r0  // copy the return address to r0
 //   mtlr  r1  // restore the original link register value
 //
-// , but it's too expensive to do if we do this for each load/store.
+// , but it's too expensive to do this for each load/store.
 //
 // As a workaround, most functions are compiled in such a way that r2 is
 // assumed to always contain the address of .got + 0x8000. With this, we
@@ -36,41 +36,42 @@
 // efficient.
 //
 // A function compiled for pre-Power10 usually has two entry points,
-// global and local. The global entry point usually 8 bytes precedes
-// the local entry point. In between is the following instructions:
+// global and local. The global entry point usually precedes the local
+// entry point by 8 bytes. In between are the following instructions:
 //
 //   addis r2, r12, .TOC.@ha
 //   addi  r2, r2,  .TOC.@lo + 4;
 //
-// The global entry point assumes that the address of itself is in r12,
-// and it computes its own TOC pointer from r12. It's easy to do so for
-// the callee because the offset between its .got + 0x8000 and the
-// function is known at link-time. The above code sequence then falls
-// through to the local entry point that assumes r2 is .got + 0x8000.
+// The global entry point assumes that its own address is in r12, and it
+// computes its own TOC pointer from r12. It's easy to do so for the callee
+// because the offset between its .got + 0x8000 and the function is known
+// at link-time. The above code sequence then falls through to the local
+// entry point that assumes r2 is .got + 0x8000.
 //
 // So, if a callee's TOC pointer is different from the current one
 // (e.g. calling a function in another .so), we first load the callee's
-// address to r12 (e.g. from .got.plt with a r2-relative load) and branch
+// address into r12 (e.g. from .got.plt with an r2-relative load) and branch
 // to that address. Then the callee computes its own TOC pointer using
 // r12.
 //
 //
 // Position-independent code on Power10:
 //
-// Power10 added 8-bytes-long instructions to the ISA. Some of them are
-// PC-relative load/store instructions that take 34 bits offsets.
+// Power10 added 8-byte-long instructions to the ISA. Some of them are
+// PC-relative load/store instructions that take 34-bit offsets.
 // Functions compiled with `-mcpu=power10` use these instructions for PIC.
-// r2 does not have a special meaning in such fucntions.
+// r2 does not have a special meaning in such functions.
 //
-// When a fucntion compiled for Power10 calls a function that uses the TOC
-// pointer, we need to compute a correct value for TOC and set it to r2
-// before transferring the control to the callee. Thunks are responsible
-// for doing it.
+// When a function compiled for Power10 calls a function that uses the TOC
+// pointer, we need to compute the correct TOC value and set r2 to it
+// before transferring control to the callee. Thunks are responsible for
+// doing it.
 //
 // `_NOTOC` relocations such as `R_PPC64_REL24_NOTOC` indicate that the
-// callee does not use TOC (i.e. compiled with `-mcpu=power10`). If a
-// function using TOC is referenced via a `_NOTOC` relocation, that call
-// is made through a range extension thunk.
+// caller does not use TOC (i.e. compiled with `-mcpu=power10`), so r2
+// doesn't hold a valid TOC pointer at the call site. If a function using
+// TOC is referenced via a `_NOTOC` relocation, that call is made through
+// a range extension thunk.
 //
 //
 // Note on section names: the PPC64 psABI uses a weird naming convention
@@ -79,6 +80,9 @@
 // able to name sections whatever we want.
 //
 // https://github.com/rui314/psabi/blob/main/ppc64v2.pdf
+//
+// The distance between the global and local entry points is encoded in
+// the symbol's `st_other`.
 
 #if MOLD_PPC64V2
 
@@ -94,6 +98,8 @@ static u64 ha(u64 x)    { return (x + 0x8000) >> 16; }
 static u64 high(u64 x)  { return (x >> 16) & 0xffff; }
 static u64 higha(u64 x) { return ((x + 0x8000) >> 16) & 0xffff; }
 
+// Writes the 34-bit immediate of a prefixed instruction, which is split
+// between the prefix word and the instruction word.
 static void write34(u8 *loc, u64 x) {
   ul32 *buf = (ul32 *)loc;
   buf[0] = (buf[0] & 0xfffc'0000) | bits(x, 33, 16);
@@ -140,8 +146,8 @@ void write_plt_header(Context<E> &ctx, u8 *buf) {
 
 template <>
 void write_plt_entry(Context<E> &ctx, u8 *buf, Symbol<E> &sym) {
-  // When the control is transferred to a PLT entry, the PLT entry's
-  // address is already set to %r12 by the caller.
+  // When control is transferred to a PLT entry, the caller has already
+  // set %r12 to the PLT entry's address.
   i64 offset = ctx.plt->shdr.sh_addr - sym.get_plt_addr(ctx);
   *(ul32 *)buf = 0x4b00'0000 | (offset & 0x00ff'ffff);        // b plt0
 }
@@ -179,6 +185,7 @@ void EhFrameSection<E>::apply_eh_reloc(Context<E> &ctx, InputSection<E> &isec,
   }
 }
 
+// The distance from a function's global entry point to its local one.
 static u64 get_local_entry_offset(Context<E> &ctx, Symbol<E> &sym) {
   i64 val = sym.esym().ppc64_local_entry;
   assert(val <= 7);
@@ -212,6 +219,8 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
     u64 GOT = ctx.got->shdr.sh_addr;
     u64 TOC = ctx.extra.TOC->value;
 
+    // Thunk entries have two entry points: one that saves r2 to the
+    // caller's stack frame first, and one 8 bytes in that doesn't.
     auto r2save_thunk_addr = [&] { return sym.get_thunk_addr(ctx, P); };
     auto no_r2save_thunk_addr = [&] { return sym.get_thunk_addr(ctx, P) + 8; };
 
@@ -239,8 +248,8 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
         *(ul32 *)loc |= bits(val, 25, 2) << 2;
 
         // The thunk saves %r2 to the caller's r2 save slot. We need to
-        // restore it after function return. To do so, there's usually a
-        // NOP as a placeholder after a BL. 0x6000'0000 is a NOP.
+        // restore it after the function returns. To do so, there's usually
+        // a NOP as a placeholder after a BL. 0x6000'0000 is a NOP.
         if (*(ul32 *)(loc + 4) == 0x6000'0000)
           *(ul32 *)(loc + 4) = 0xe841'0018; // ld r2, 24(r1)
       } else {
@@ -528,8 +537,8 @@ void Thunk<E>::copy_buf(Context<E> &ctx) {
     0x4e80'0420, // bctr
   };
 
-  // If the destination is a non-imported function, we directly jump
-  // to its local entry point.
+  // If the destination is a non-imported function, we jump to its
+  // global entry point with r12 set to that address.
   constexpr ul32 local_thunk[] = {
     0xf841'0018, // std   r2, 24(r1)
     0x6000'0000, // nop

@@ -1,47 +1,49 @@
 // This file contains code for the 64-bit PowerPC ELFv1 ABI that is
 // commonly used for big-endian PPC systems. Modern PPC systems that use
-// the processor in the little-endian mode use the ELFv2 ABI instead. For
+// the processor in little-endian mode use the ELFv2 ABI instead. For
 // ELFv2, see arch-ppc64v2.cc.
 //
-// Even though they are similiar, ELFv1 isn't only different from ELFv2 in
-// endianness. The most notable difference is, in ELFv1, a function
+// Even though they are similar, ELFv1 differs from ELFv2 not only in
+// endianness. The most notable difference is that, in ELFv1, a function
 // pointer doesn't directly refer to the entry point of a function but
-// instead refers to a data structure so-called "function descriptor".
+// instead refers to a data structure called a "function descriptor".
 //
 // The function descriptor is essentially a pair of a function entry point
-// address and a value that should be set to %r2 before calling that
+// address and a value that should be loaded into %r2 before calling that
 // function. There is also a third member for "the environment pointer for
 // languages such as Pascal and PL/1" according to the psABI, but it looks
-// like no one acutally uses it. In total, the function descriptor is 24
+// like no one actually uses it. In total, the function descriptor is 24
 // bytes long. Here is why we need it.
 //
 // PPC generally lacks PC-relative data access instructions. Position-
-// independent code sets GOT + 0x8000 to %r2 and access global variables
+// independent code sets %r2 to GOT + 0x8000 and accesses global variables
 // relative to %r2.
 //
 // Each ELF file has its own GOT. If a function calls another function in
-// the same ELF file, it doesn't have to reset %r2. However, if it is in
-// other file (e.g. other .so), it has to set a new value to %r2 so that
-// the register contains the callee's GOT + 0x8000.
+// the same ELF file, it doesn't have to reset %r2. However, if the callee
+// is in another file (e.g. another .so), %r2 has to be set to a new value
+// so that the register contains the callee's GOT + 0x8000.
 //
-// In this way, you can't call a function just by knowing the function's
+// Therefore, you can't call a function just by knowing the function's
 // entry point address. You also need to know a proper %r2 value for the
 // function. This is why a function pointer refers to a tuple of an
 // address and a %r2 value.
 //
-// If a function call is made through PLT, PLT takes care of restoring %r2.
-// Therefore, the caller has to restore %r2 only for function calls
+// If a function call is made through the PLT, the PLT stub saves %r2 in
+// the caller's stack frame, and the linker rewrites the NOP following the
+// call instruction into an instruction that restores %r2. Therefore, the
+// caller has to save and restore %r2 by itself only for function calls
 // through function pointers.
 //
 // .opd (short for "official procedure descriptors") contains function
 // descriptors.
 //
-// You can think OPD as this: even in other targets, a function can have a
-// few different addresses for different purposes. It may not only have an
-// entry point address but may also have PLT and/or GOT addresses.
-// In PPCV1, it may have an OPD address in addition to these. OPD address
-// is used for relocations that refers to the address of a function as a
-// function pointer.
+// Here is one way to think about OPD. Even on other targets, a function
+// can have a few different addresses for different purposes. It may not
+// only have an entry point address but may also have PLT and/or GOT
+// addresses. In PPCV1, it may have an OPD address in addition to these.
+// The OPD address is used for relocations that refer to the address of a
+// function as a function pointer.
 //
 // https://github.com/rui314/psabi/blob/main/ppc64v1.pdf
 
@@ -97,11 +99,11 @@ void write_plt_entry(Context<E> &ctx, u8 *buf, Symbol<E> &sym) {
   ub32 *loc = (ub32 *)buf;
   i64 idx = sym.get_plt_idx(ctx);
 
-  // The PPC64 ELFv1 ABI requires PLT entries to be vary in size depending
+  // The PPC64 ELFv1 ABI requires PLT entries to vary in size depending
   // on their indices. Unlike other targets, .got.plt is filled not by us
-  // but by the loader, so we don't have a control over where the initial
+  // but by the loader, so we don't have control over where the initial
   // call to the PLT entry jumps to. So we need to strictly follow the PLT
-  // section layout as the loader expect it to be.
+  // section layout that the loader expects.
   if (idx < 0x8000) {
     constexpr ub32 insn[] = {
       0x3800'0000, // li      r0, PLT_INDEX
@@ -208,10 +210,10 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       check(val, -(1 << 25), 1 << 25);
       *(ub32 *)loc |= bits(val, 25, 2) << 2;
 
-      // If a callee is an external function, PLT saves %r2 to the
-      // caller's r2 save slot. We need to restore it after function
-      // return. To do so, there's usually a NOP as a placeholder
-      // after a BL. 0x6000'0000 is a NOP.
+      // If a callee is an external function, the PLT saves %r2 to the
+      // caller's r2 save slot. We need to restore it after the function
+      // returns. To do so, there's usually a NOP as a placeholder after
+      // a BL. 0x6000'0000 is a NOP.
       if (sym.has_plt(ctx) && *(ub32 *)(loc + 4) == 0x6000'0000)
         *(ub32 *)(loc + 4) = 0xe841'0028; // ld r2, 40(r1)
       break;
@@ -349,7 +351,7 @@ void InputSection<E>::scan_relocations(Context<E> &ctx) {
     if (sym.is_ifunc())
       sym.flags |= NEEDS_GOT | NEEDS_PLT | NEEDS_PPC_OPD;
 
-    // Any relocation except R_PPC64_REL24 is considered as an
+    // Any relocation except R_PPC64_REL24 is considered an
     // address-taking relocation.
     if (rel.r_type != R_PPC64_REL24 && sym.get_type() == STT_FUNC)
       sym.flags |= NEEDS_PPC_OPD;
@@ -523,47 +525,47 @@ get_opd_sym_at(std::span<OpdSymbol> syms, u64 offset) {
   return it->sym;
 }
 
-// Compiler creates an .opd entry for each function symbol. The intention
-// is to make it possible to create an output .opd section just by linking
-// input .opd sections in the same manner as we do to other normal input
-// sections.
+// The compiler creates an .opd entry for each function symbol. The
+// intention is to make it possible to create an output .opd section just
+// by linking input .opd sections in the same manner as we do for other
+// normal input sections.
 //
-// However, in reality, .opd isn't a normal input section. It needs many
-// special treatments as follows:
+// However, in reality, .opd isn't a normal input section. It needs special
+// treatment in many ways:
 //
-// 1. A function symbol refers to not a .text but an .opd. Its address
-//    works fine for address-taking relocations such as R_PPC64_ADDR64.
-//    However, R_PPC64_REL24 (which is used for branch instruction) needs
-//    a function's real address instead of the function's .opd address.
-//    We need to read .opd contents to find out a function entry point
-//    address to apply R_PPC64_REL24.
+// 1. A function symbol refers not to a .text section but to an .opd
+//    section. Its address works fine for address-taking relocations such
+//    as R_PPC64_ADDR64. However, R_PPC64_REL24 (which is used for branch
+//    instructions) needs a function's real address instead of the
+//    function's .opd address. We need to read .opd contents to find a
+//    function's entry point address to apply R_PPC64_REL24.
 //
 // 2. Output .opd entries are needed only for functions whose addresses
 //    are taken. Just copying input .opd sections to an output would
-//    produces lots of dead .opd entries.
+//    produce lots of dead .opd entries.
 //
 // 3. In this design, all function symbols refer to an .opd section, and
 //    that doesn't work well with graph traversal optimizations such as
-//    garbage collection or identical comdat folding. For example, garbage
-//    collector would mark an .opd alive which in turn mark all functions
-//    thatare referenced by .opd as alive, effectively keeping all
-//    functions as alive.
+//    garbage collection or identical comdat folding. For example, the
+//    garbage collector would mark an .opd alive, which in turn marks all
+//    functions that are referenced by .opd as alive, effectively keeping
+//    all functions alive.
 //
 // The problem is that the compiler creates a half-baked .opd section, and
 // the linker has to figure out what all these .opd entries and
-// relocations are trying to achieve. It's like the compiler would emit a
-// half-baked .plt section in an object file and the linker has to deal
+// relocations are trying to achieve. It's as if the compiler emitted a
+// half-baked .plt section in an object file and the linker had to deal
 // with that. That's not a good design.
 //
 // So, in this function, we undo what the compiler did to .opd. We remove
 // function symbols from .opd and reattach them to their function entry
 // points. We also rewrite relocations that directly refer to an input
-// .opd  section so that they refer to function symbols instead. We then
+// .opd section so that they refer to function symbols instead. We then
 // mark input .opd sections as dead.
 //
-// After this function, we mark symbols with the NEEDS_PPC_OPD flag if the
-// symbol needs an .opd entry. We then create an output .opd just like we
-// do for .plt or .got.
+// After this function, we mark symbols with the NEEDS_PPC_OPD flag if they
+// need an .opd entry. We then create an output .opd just like we do for
+// .plt or .got.
 void ppc64v1_rewrite_opd(Context<E> &ctx) {
   tbb::parallel_for_each(ctx.objs, [&](ObjectFile<E> *file) {
     InputSection<E> *opd = get_opd_section(*file);
@@ -596,10 +598,14 @@ void ppc64v1_rewrite_opd(Context<E> &ctx) {
       sym->value = rel->r_addend;
     }
 
-    // Sort symbols so that get_opd_sym_at() can do binary search.
+    // Sort symbols by descriptor so that get_opd_sym_at() can binary search
+    // them. Aliases share a descriptor, and the stable sort keeps them in
+    // symbol table order, so the lower bound is the first alias, which is
+    // the local symbol if there is one. Binding a section-relative reference
+    // to a global alias instead would make it preemptible.
     ranges::stable_sort(opd_syms, {}, &OpdSymbol::r_offset);
 
-    // Rewrite relocations so that they directly refer to .opd.
+    // Rewrite relocations that refer to .opd to refer to function symbols.
     for (InputSection<E> *isec : file->sections) {
       if (!isec || !isec->is_alive() || isec == opd)
         continue;
@@ -622,7 +628,7 @@ void ppc64v1_rewrite_opd(Context<E> &ctx) {
 }
 
 // When a function is exported, the dynamic symbol for the function should
-// refers to the function's .opd entry. This function marks such symbols
+// refer to the function's .opd entry. This function marks such symbols
 // with NEEDS_PPC_OPD.
 void ppc64v1_scan_symbols(Context<E> &ctx) {
   ctx.symbol_map.parallel_for_each([](Symbol<E> &sym) {
@@ -631,7 +637,8 @@ void ppc64v1_scan_symbols(Context<E> &ctx) {
         sym.flags |= NEEDS_PPC_OPD;
   });
 
-  // Functions referenced by the ELF header also have to have .opd entries.
+  // Functions referenced by the ELF header (the entry point) or by .dynamic
+  // (init and fini) also have to have .opd entries.
   if (!ctx.arg.entry->is_imported)
     ctx.arg.entry->flags |= NEEDS_PPC_OPD;
 
@@ -648,6 +655,8 @@ void PPC64OpdSection::add_symbol(Context<E> &ctx, Symbol<E> *sym) {
   this->shdr.sh_size += ENTRY_SIZE;
 }
 
+// Position-independent output relocates both the entry point and the
+// TOC pointer at load time.
 i64 PPC64OpdSection::get_num_dynrels(Context<E> &ctx) const {
   return ctx.arg.pic ? symbols.size() * 2 : 0;
 }
@@ -685,6 +694,8 @@ void PPC64OpdSection::copy_buf(Context<E> &ctx) {
   ub64 *buf = (ub64 *)(ctx.buf + this->shdr.sh_offset);
 
   for (Symbol<E> *sym : symbols) {
+    // A descriptor holds the function's own address, not that of its PLT
+    // entry or of the descriptor itself.
     u64 addr = sym->get_addr(ctx, NO_PLT | NO_OPD);
     *buf++ = addr;
     *buf++ = ctx.extra.TOC->value;

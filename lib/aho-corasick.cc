@@ -114,8 +114,8 @@ void AhoCorasick::compile() {
   if (nodes.empty())
     return;
 
-  // A failure link may refer to any node at the previous depth, so failure
-  // links must be constructed breadth-first.
+  // A failure link may refer to any shallower node, so failure links
+  // must be constructed breadth-first.
   std::queue<i32> queue;
   for (i32 child = nodes[0].first_child; child != -1;
        child = nodes[child].next_sibling) {

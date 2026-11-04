@@ -135,6 +135,9 @@ void EhFrameSection<E>::apply_eh_reloc(Context<E> &ctx, InputSection<E> &isec,
   }
 }
 
+// Returns the instruction to substitute when a GOT load can become a
+// direct reference, or 0 if the instruction isn't relaxable. `loc` points
+// to the relocated operand, so the opcode bytes are at loc[-3] to loc[-1].
 static u32 relax_gotpcrelx(u8 *loc, const ElfRel<E> &rel) {
   if (rel.r_type == R_X86_64_GOTPCRELX) {
     switch ((loc[-2] << 8) | loc[-1]) {
@@ -387,8 +390,8 @@ static void relax_ld_to_le(u8 *loc, const ElfRel<E> &rel, i64 tls_size) {
     //  48 8d 3d 00 00 00 00    lea    foo@tlsld(%rip), %rdi
     //  e8 00 00 00 00          call   __tls_get_addr
     //
-    // Because the original instruction sequence is so short that we need a
-    // little bit of code golfing here. "mov %fs:0, %rax" is 9 byte long, so
+    // The original instruction sequence is so short that we need a
+    // little bit of code golfing here. "mov %fs:0, %rax" is 9 bytes long, so
     // xor + mov is shorter. Note that `xor %eax, %eax` zero-clears %eax.
     static const u8 insn[] = {
       0x31, 0xc0,                   // xor %eax, %eax

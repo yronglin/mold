@@ -5,29 +5,35 @@
 // An archive file is either "regular" or "thin". A regular archive
 // contains object files directly, while a thin archive contains only
 // pathnames. In the latter case, actual file contents have to be read
-// from given pathnames. A regular archive is sometimes called "fat"
+// from given pathnames. A regular archive is sometimes called a "fat"
 // archive as opposed to "thin".
 //
 // If an archive file is given to the linker, the linker pulls out
 // object files that are needed to resolve undefined symbols. So,
-// bunding object files as an archive and giving that archive to the
+// bundling object files as an archive and giving that archive to the
 // linker has a different meaning than directly giving the same set of
 // object files to the linker. The former links only needed object
 // files, while the latter links all the given object files.
 //
 // Therefore, if you link libc.a for example, not all the libc
 // functions are linked to your binary. Instead, only object files
-// that provides functions and variables used in your program get
+// that provide functions and variables used in your program get
 // linked. To make this efficient, static library functions are
-// usually separated to each object file in an archive file. You can
+// usually placed in separate object files in an archive file. You can
 // see the contents of libc.a by running `ar t
 // /usr/lib/x86_64-linux-gnu/libc.a`.
+//
+// GNU ar stores long member names in a string table member. BSD ar,
+// which macOS uses, stores a long name right after the member header
+// instead, and puts a symbol table in a member named __.SYMDEF. Both
+// forms are read here.
 
 #include "mold.h"
 
 namespace mold {
 
 namespace {
+// An archive member header.
 struct ArHdr {
   char ar_name[16];
   char ar_date[12];
@@ -49,6 +55,8 @@ struct ArHdr {
     return starts_with("/ ") || starts_with("/SYM64/ ");
   }
 
+  // Returns the member's file name. A BSD-style long name is stored
+  // right after the header, so `ptr` is advanced past it.
   std::string read_name(std::string_view strtab, u8 *&ptr) const {
     // BSD-style long filename
     if (starts_with("#1/")) {
@@ -67,7 +75,7 @@ struct ArHdr {
       return {start, (const char *)strstr(start, "/\n")};
     }
 
-    // Short fileanme
+    // Short filename, space-padded and, in the SysV form, slash-terminated
     if (const char *end = (char *)memchr(ar_name, '/', sizeof(ar_name)))
       return {ar_name, end};
     return {ar_name, sizeof(ar_name)};
@@ -112,7 +120,7 @@ get_thin_archive_member_paths(Context<E> &ctx, MappedFile *mf) {
 
     std::string name = hdr.read_name(strtab, body);
 
-    // Skip if symbol table
+    // Skip BSD archive symbol tables (__.SYMDEF and __.SYMDEF SORTED).
     if (name == "__.SYMDEF" || name == "__.SYMDEF SORTED") {
       data = body + size;
       continue;
@@ -122,6 +130,9 @@ get_thin_archive_member_paths(Context<E> &ctx, MappedFile *mf) {
       vec.push_back(name);
     else
       vec.push_back((path_dirname(mf->name) / name).string());
+
+    // A thin archive member's contents live elsewhere; only a BSD-style
+    // long name occupies space after the header.
     data = body;
   }
   return vec;
@@ -168,7 +179,7 @@ read_fat_archive_members(Context<E> &ctx, MappedFile *mf) {
     // Read the name field
     std::string name = hdr.read_name(strtab, body);
 
-    // Skip if symbol table
+    // Skip BSD archive symbol tables (__.SYMDEF and __.SYMDEF SORTED).
     if (name == "__.SYMDEF" || name == "__.SYMDEF SORTED")
       continue;
 

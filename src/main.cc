@@ -56,6 +56,9 @@ static void defer_lto_obj(Context<E> &ctx, ReaderContext &rctx,
   ctx.lto_jobs.push_back(std::move(job));
 }
 
+// Reads an IR object through the LTO plugin. An IR file listed by
+// --:ignore-ir-file was found unneeded by a previous run of mold (see
+// restart_process() in lto-unix.cc).
 template <typename E>
 static void new_lto_obj(Context<E> &ctx, ReaderContext &rctx,
                         MappedFile *mf, std::string archive_name) {
@@ -120,6 +123,8 @@ static void read_archive_member(Context<E> &ctx, ReaderContext &rctx,
 // script, the files in it are read in place, recursively. IR files
 // for LTO are only recorded; see defer_lto_obj().
 //
+// Linker scripts read the files they name with this function.
+//
 // read_input_files() reads top-level files with this function too but
 // overrides the container cases to read archive members in parallel.
 template <typename E>
@@ -150,6 +155,7 @@ void read_file(Context<E> &ctx, ReaderContext &rctx, MappedFile *mf) {
   }
 }
 
+// Deduces the target from the first recognizable input file.
 template <typename E>
 static std::string_view
 detect_machine_type(Context<E> &ctx, std::span<ReaderJob> jobs) {
@@ -188,6 +194,7 @@ MappedFile *open_library(Context<E> &ctx, ReaderContext &rctx, std::string path)
   return mf;
 }
 
+// Finds a library given to -l.
 template <typename E>
 MappedFile *find_library(Context<E> &ctx, ReaderContext &rctx, std::string name) {
   if (name.starts_with(':')) {
@@ -354,6 +361,8 @@ static void read_input_files(Context<E> &ctx, std::vector<ReaderJob> &jobs) {
     Fatal(ctx) << "no input files";
 }
 
+// Returns true if the link involves the LTO plugin, i.e. if a reachable
+// input file is an IR object or a GCC offload object.
 template <typename E>
 static bool has_lto_obj(Context<E> &ctx) {
   for (ObjectFile<E> *file : ctx.objs)
@@ -395,7 +404,7 @@ int mold_main(int argc, char **argv) {
   if (ctx.arg.emulation.empty())
     ctx.arg.emulation = detect_machine_type(ctx, jobs);
 
-  // Redo if -m does not match with our speculation.
+  // Redo if -m does not match our speculation.
   if (ctx.arg.emulation != E::name) {
     if (!ec)
       std::filesystem::current_path(orig_cwd, ec);
@@ -461,7 +470,7 @@ int mold_main(int argc, char **argv) {
   if (has_lto_obj(ctx))
     do_lto(ctx);
 
-  // Now that we know which object files are to be included to the
+  // Now that we know which object files are to be included in the
   // final output, we can remove unnecessary files.
   std::erase_if(ctx.objs, [](InputFile<E> *file) { return !file->is_reachable; });
   std::erase_if(ctx.dsos, [](InputFile<E> *file) { return !file->is_reachable; });
@@ -490,7 +499,7 @@ int mold_main(int argc, char **argv) {
 
   // Handle --relocatable. Since the linker's behavior is quite different
   // from the normal one when the option is given, the logic is implemented
-  // to a separate file.
+  // in a separate file.
   if (ctx.arg.relocatable) {
     combine_objects(ctx);
     return 0;
@@ -585,7 +594,7 @@ int mold_main(int argc, char **argv) {
       if (file->needs_executable_stack)
         ctx.arg.z_execstack = true;
 
-  // If we are linking a .so file, remaining undefined symbols does
+  // If we are linking a .so file, remaining undefined symbols do
   // not cause a linker error. Instead, they are treated as if they
   // were imported symbols.
   //
@@ -610,10 +619,10 @@ int mold_main(int argc, char **argv) {
   sort_init_fini(ctx);
 
   // Likewise, .ctors and .dtors have to be sorted. They are rare
-  // because they are superceded by .init_array/.fini_array, though.
+  // because they are superseded by .init_array/.fini_array, though.
   sort_ctor_dtor(ctx);
 
-  // If .ctors/.dtors are to be placed to .init_array/.fini_array,
+  // If .ctors/.dtors are to be placed in .init_array/.fini_array,
   // we need to reverse their contents.
   fixup_ctors_in_init_array(ctx);
 
@@ -621,7 +630,7 @@ int mold_main(int argc, char **argv) {
   if (ctx.arg.shuffle_sections != SHUFFLE_SECTIONS_NONE)
     shuffle_sections(ctx);
 
-  // Copy string referred by .dynamic to .dynstr.
+  // Copy strings referred to by .dynamic to .dynstr.
   add_dynamic_strings(ctx);
 
   if constexpr (is_ppc64v1<E>)
@@ -654,12 +663,13 @@ int mold_main(int argc, char **argv) {
   if (ctx.arg.pack_dyn_relocs_relr)
     ctx.reldyn->construct_relr(ctx);
 
-  // Reserve a space for dynamic symbol strings in .dynstr and sort
+  // Reserve space for dynamic symbol strings in .dynstr and sort
   // .dynsym contents if necessary. Beyond this point, no symbol will
   // be added to .dynsym.
   sort_dynsyms(ctx);
 
-  // sort_debug_info_sections may uncompress the same .debug_info sections.
+  // sort_debug_info_sections may uncompress the .debug_info sections
+  // that the .gdb_index reader reads.
   if (create_gdb_index)
     gdb_input_arena.execute([&] { gdb_task.wait(); });
 
@@ -717,7 +727,7 @@ int mold_main(int argc, char **argv) {
   // Assign offsets to output sections
   i64 filesize = set_osec_offsets(ctx);
 
-  // On RISC-V, branches are encode using multiple instructions so
+  // On RISC-V, branches are encoded using multiple instructions so
   // that they can jump to anywhere in ±2 GiB by default. They may
   // be replaced with shorter instruction sequences if destinations
   // are close enough. Do this optimization.
@@ -726,9 +736,9 @@ int mold_main(int argc, char **argv) {
     filesize = set_osec_offsets(ctx);
   }
 
-  // We've created range extension thunks with a pessimistive assumption
+  // We've created range extension thunks with the pessimistic assumption
   // that all out-of-section references are out of range. Now that we know
-  // the addresses of all sections,, we can eliminate excessive thunks.
+  // the addresses of all sections, we can eliminate unnecessary thunks.
   if constexpr (needs_thunk<E>) {
     remove_redundant_thunks(ctx);
     filesize = set_osec_offsets(ctx);
@@ -746,8 +756,8 @@ int mold_main(int argc, char **argv) {
   // Set actual addresses to linker-synthesized symbols.
   fix_synthetic_symbols(ctx);
 
-  // Beyond this, you can assume that symbol addresses including their
-  // GOT or PLT addresses have a correct final value.
+  // Beyond this point, you can assume that symbol addresses, including
+  // their GOT or PLT addresses, have correct final values.
 
   // If --compress-debug-sections is given, compress .debug_* sections
   // using zlib or zstd.
@@ -756,7 +766,7 @@ int mold_main(int argc, char **argv) {
     filesize = set_osec_offsets(ctx);
   }
 
-  // Gather thunk symbols and attach them to themselves.
+  // Gather thunk addresses and attach them to their symbols.
   if constexpr (needs_thunk<E>)
     gather_thunk_addresses(ctx);
 
@@ -791,8 +801,8 @@ int mold_main(int argc, char **argv) {
     if (ctx.arg.z_rewrite_endbr)
       rewrite_endbr(ctx);
 
-  // Dynamic linker works better with sorted .rela.dyn section,
-  // so we sort them.
+  // The dynamic linker works better with a sorted .rela.dyn section,
+  // so we sort it.
   sort_reldyn(ctx);
 
   // The final stage reads address ranges, which requires relocated debug
@@ -802,9 +812,9 @@ int mold_main(int argc, char **argv) {
     write_gdb_index(ctx);
   }
 
-  // .note.gnu.build-id section contains a cryptographic hash of the
-  // entire output file. Now that we wrote everything except build-id,
-  // we can compute it.
+  // The .note.gnu.build-id section contains a cryptographic hash of the
+  // entire output file. Now that we have written everything except the
+  // build ID, we can compute it.
   if (ctx.buildid)
     write_build_id(ctx);
 

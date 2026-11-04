@@ -14,6 +14,8 @@
 
 namespace mold {
 
+// Returns the process's umask. umask(2) can only be read by setting it,
+// so we restore the original value immediately.
 static u32 get_umask() {
   u32 orig_umask = umask(0);
   umask(orig_umask);
@@ -40,6 +42,10 @@ open_or_create_file(Context<E> &ctx, std::string path, std::string tmpfile,
   return fd;
 }
 
+// MemoryMappedOutputFile writes a regular file through a memory mapping of
+// a temporary file that is renamed into place on close, so that a failed
+// link doesn't leave a truncated output behind and a running executable
+// isn't modified underneath the kernel.
 template <typename E>
 class MemoryMappedOutputFile : public OutputFile<E> {
 public:
@@ -56,6 +62,9 @@ public:
     if (ftruncate(this->fd, filesize) == -1)
       Fatal(ctx) << "ftruncate failed: " << errno_string();
 
+    // Register the temporary file so that cleanup() removes it on a fatal
+    // error. The string must live until process exit, as a signal handler
+    // may read it at any time.
     output_tmpfile = (char *)save_string(ctx, tmpfile).data();
 
 #if HAVE_FALLOCATE
@@ -106,6 +115,9 @@ public:
       Fatal(ctx) << "ftruncate failed: " << errno_string();
 
 #if HAVE_FALLOCATE
+    // Allocate only the appended range. Reallocating the already written
+    // prefix can flush dirty extents on filesystems such as btrfs and
+    // serialize a large part of .gdb_index output.
     if (struct statfs fs;
         fstatfs(this->fd, &fs) || fs.f_type != TMPFS_MAGIC)
       fallocate(this->fd, 0, mapsize, size);
@@ -113,7 +125,9 @@ public:
 
     if (mapsize + size > vasize) {
       // The appended data does not fit in the mapping. Map the grown
-      // file again, moving the buffer.
+      // file again, moving the buffer. Release the old mapping first, as
+      // the address space may be too tight for both. The data written
+      // through it stays in the file.
       munmap(this->buf, vasize);
       vasize = mapsize + size;
 
@@ -142,9 +156,9 @@ public:
       munmap(this->buf, vasize);
     ::close(this->fd);
 
-    // If an output file already exists, open a file and then remove it.
+    // If an output file already exists, open it and then remove it.
     // This is the fastest way to unlink a file, as it does not make the
-    // system to immediately release disk blocks occupied by the file.
+    // system immediately release disk blocks occupied by the file.
     fd2 = ::open(this->path.c_str(), O_RDONLY);
     if (fd2 != -1)
       unlink(this->path.c_str());
@@ -161,6 +175,12 @@ private:
   i64 vasize = 0;
 };
 
+// Opens an output file of the given size.
+//
+// A regular file is written through a memory mapping of a temporary file
+// that is renamed into place on close (see MemoryMappedOutputFile).
+// Anything else, such as a device, a pipe or standard output, is
+// assembled in memory and written out at the end.
 template <typename E>
 std::unique_ptr<OutputFile<E>>
 OutputFile<E>::open(Context<E> &ctx, std::string path, i64 filesize, int perm) {
@@ -182,6 +202,12 @@ OutputFile<E>::open(Context<E> &ctx, std::string path, i64 filesize, int perm) {
 #ifdef MADV_HUGEPAGE
   // Enable transparent huge page for an output memory-mapped file.
   // Linking a Chromium debug build is ~20% faster with this madvise call.
+  //
+  // Without this, every 4 KiB page of the output takes its own page fault
+  // when it is first written, and the faults of the many copying threads
+  // serialize on the file's page cache. With it, the kernel backs the
+  // mapping with large folios and the number of faults drops by an order
+  // of magnitude.
   madvise(file->buf, filesize, MADV_HUGEPAGE);
 #endif
 
@@ -191,7 +217,11 @@ OutputFile<E>::open(Context<E> &ctx, std::string path, i64 filesize, int perm) {
 }
 
 // LockingOutputFile is similar to MemoryMappedOutputFile, but it doesn't
-// rename output files and instead acquires file lock using flock().
+// rename output files and instead writes in place and acquires an
+// exclusive file lock using flock(). This is used for a separate debug
+// file that a debugger may wait on. The file is made unusable right away
+// so that a stale one is not picked up by accident; resize() gives it its
+// size.
 template <typename E>
 LockingOutputFile<E>::LockingOutputFile(Context<E> &ctx, std::string path,
                                         int perm)
@@ -201,13 +231,14 @@ LockingOutputFile<E>::LockingOutputFile(Context<E> &ctx, std::string path,
     Fatal(ctx) << "cannot open " << path << ": " << errno_string();
   flock(this->fd, LOCK_EX);
 
-  // We may be overwriting to an existing debug info file. We want to
+  // We may be overwriting an existing debug info file. We want to
   // make the file unusable so that gdb won't use it by accident until
   // it's ready.
   u8 buf[256] = {};
   (void)!!write(this->fd, buf, sizeof(buf));
 }
 
+// Sets the size of the file and maps it.
 template <typename E>
 void LockingOutputFile<E>::resize(Context<E> &ctx, i64 filesize) {
   if (ftruncate(this->fd, filesize) == -1)

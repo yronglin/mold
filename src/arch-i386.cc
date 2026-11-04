@@ -32,6 +32,9 @@
 // dependent PLT entries which don't use %ebx.
 //
 // https://github.com/rui314/psabi/blob/main/i386.pdf
+//
+// Relocations are of the REL type: addends live in the relocated
+// locations rather than in the relocation entries.
 
 #if MOLD_I386
 
@@ -405,9 +408,9 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       //   call   *(%eax)
       //       R_386_TLS_DESC_CALL foo
       //
-      // Note that the compiler always uses the local-exec TLS model
-      // for -fno-pic, so TLSDESC code is always PIC (i.e. uses %ebx to
-      // store the address of GOT.)
+      // Note that the compiler uses the local-exec or initial-exec TLS
+      // model for -fno-pic, so TLSDESC code is always PIC (i.e. uses %ebx
+      // to store the address of the GOT).
       if (sym.has_tlsdesc(ctx)) {
         *(ul32 *)loc = sym.get_tlsdesc_addr(ctx) + A - GOT;
       } else if (sym.has_gottp(ctx)) {

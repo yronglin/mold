@@ -10,6 +10,8 @@
 
 namespace mold {
 
+// Demangles an Itanium C++ ABI symbol name. Returns nullopt if `name` is
+// not a mangled C++ name or cannot be demangled.
 std::optional<std::string_view> demangle_cpp(std::string_view name) {
   static thread_local char *buf;
   static thread_local size_t buflen;
@@ -30,6 +32,8 @@ std::optional<std::string_view> demangle_cpp(std::string_view name) {
   return {};
 }
 
+// Demangles a Rust symbol name in either the legacy or the v0 scheme.
+// Crate disambiguator hashes are omitted, as rustc's own tools do.
 std::optional<std::string_view> demangle_rust(std::string_view name) {
   static thread_local char *buf;
   free(buf);

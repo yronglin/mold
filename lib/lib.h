@@ -1,3 +1,6 @@
+// Code that mold's linkers share. Nothing here depends on the format of
+// object files.
+
 #pragma once
 
 #include "atomics.h"
@@ -182,6 +185,10 @@ struct TimerRecord {
 void
 print_timer_records(tbb::concurrent_vector<std::unique_ptr<TimerRecord>> &);
 
+// A Timer is stopped when destroyed. Timers started from parallel tasks
+// should name their parent explicitly, because in parallel code, the timer
+// that started last is not necessarily the enclosing one. Otherwise, the
+// nesting is inferred from completed time intervals.
 template <typename Context>
 class Timer {
 public:
@@ -255,6 +262,8 @@ private:
   i64 size_ = 0;
 };
 
+// Rounds `val` up to a multiple of `align`, which must be zero or a power
+// of two. Zero means "no alignment".
 inline u64 align_to(u64 val, u64 align) {
   if (align == 0)
     return val;
@@ -262,11 +271,13 @@ inline u64 align_to(u64 val, u64 align) {
   return (val + align - 1) & ~(align - 1);
 }
 
+// Rounds `val` down to a multiple of `align`, which must be a power of two.
 inline u64 align_down(u64 val, u64 align) {
   assert(has_single_bit(align));
   return val & ~(align - 1);
 }
 
+// Returns bit `pos` of `val`.
 inline u64 bit(u64 val, i64 pos) {
   return (val >> pos) & 1;
 };
@@ -282,6 +293,7 @@ inline i64 sign_extend(u64 val, i64 n) {
   return (i64)(val << (64 - n)) >> (64 - n);
 }
 
+// Returns true if `val` is representable as a signed N bit integer.
 inline bool is_int(u64 val, i64 n) {
   return sign_extend(val, n) == val;
 }
@@ -325,6 +337,7 @@ inline void remove_duplicates(std::vector<T> &vec) {
   vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
 }
 
+// Writes a NUL-terminated string and returns the number of bytes written.
 inline i64 write_string(void *buf, std::string_view str) {
   memcpy(buf, str.data(), str.size());
   *((u8 *)buf + str.size()) = '\0';
@@ -391,6 +404,7 @@ inline void parallel_memcpy(void *dst, const void *src, i64 size) {
                     });
 }
 
+// Appends `val` in unsigned LEB128 encoding.
 inline void encode_uleb(std::vector<u8> &vec, u64 val) {
   do {
     u8 byte = val & 0x7f;
@@ -399,6 +413,7 @@ inline void encode_uleb(std::vector<u8> &vec, u64 val) {
   } while (val);
 }
 
+// Appends `val` in signed LEB128 encoding.
 inline void encode_sleb(std::vector<u8> &vec, i64 val) {
   for (;;) {
     u8 byte = val & 0x7f;
@@ -413,6 +428,7 @@ inline void encode_sleb(std::vector<u8> &vec, i64 val) {
   }
 }
 
+// Writes `val` in unsigned LEB128 encoding at `buf`, returning its length.
 inline i64 write_uleb(u8 *buf, u64 val) {
   i64 i = 0;
   do {
@@ -423,6 +439,7 @@ inline i64 write_uleb(u8 *buf, u64 val) {
   return i;
 }
 
+// Reads an unsigned LEB128 value, advancing `*buf` past it.
 inline u64 read_uleb(u8 **buf) {
   u64 val = 0;
   u8 shift = 0;
@@ -440,6 +457,7 @@ inline u64 read_uleb(u8 *buf) {
   return read_uleb(&tmp);
 }
 
+// Reads a signed LEB128 value, advancing `*buf` past it.
 inline i64 read_sleb(u8 **buf) {
   u64 val = 0;
   u8 shift = 0;
@@ -470,6 +488,8 @@ inline u64 read_uleb(std::string_view str) {
   return read_uleb(&tmp);
 }
 
+// Overwrites an existing unsigned LEB128 value in place, keeping its
+// length.
 inline void overwrite_uleb(u8 *loc, u64 val) {
   while (*loc & 0b1000'0000) {
     *loc++ = 0b1000'0000 | (val & 0b0111'1111);
@@ -494,12 +514,21 @@ static inline void pause() {
 
 // This is an implementation of a fast concurrent hash map. Unlike
 // ordinary hash tables, this impl just aborts if it becomes full.
-// So you need to give a correct estimation of the final size before
+// So you need to give a correct estimate of the final size before
 // using it. We use this hash map to uniquify pieces of data in
 // mergeable sections.
 //
 // We've implemented this ourselves because the performance of
-// conrurent hash map is critical for our linker.
+// a concurrent hash map is critical for our linker.
+//
+// The map is an open-addressing table. Insertion is lock-free: a thread
+// claims an empty bucket with a compare-and-swap on its key pointer,
+// initializes the value, and then publishes the key; a thread that finds
+// a claimed bucket spins until the key appears. Probing stays within a
+// shard of the table, so the entries of a shard can be laid out
+// independently of the others. Keys are strings that live for the whole
+// link, such as string literals inside input files, hashed once by the
+// caller.
 template <typename T>
 class ConcurrentMap {
 public:
@@ -524,6 +553,10 @@ public:
   // power-of-two address.
   struct alignas(32) Entry {
     Atomic<const char *> key;
+
+    // `keylen` is written before `key` is published with a release store
+    // and is read only after an acquire load that observes the key, so it
+    // need not be atomic.
     u32 keylen;
     T value;
   };
@@ -548,6 +581,8 @@ public:
 #endif
   }
 
+  // Inserts `key` unless it is present, initializing the value with `val`.
+  // Returns the value and whether it was inserted.
   std::pair<T *, bool> insert(std::string_view key, u64 hash, const T &val) {
     return insert_entry(key.data(), hash, val,
                         [&](const char *ptr, u32 len) {
@@ -556,6 +591,8 @@ public:
                         [&](T &) { return (u32)key.size(); });
   }
 
+  // Inserts a NUL-terminated key, which must remain live for the lifetime
+  // of the map.
   std::pair<T *, bool> insert_cstr(const char *key, u64 hash, const T &val,
                                    auto initialize) {
     // This variant avoids storing a length alongside every caller-side key.
@@ -566,6 +603,8 @@ public:
       [&](T &value) { return initialize(value, key); });
   }
 
+  // Returns the index of the bucket holding `value`, which identifies the
+  // entry for the life of the map.
   i64 get_idx(T *value) const {
     uintptr_t addr = (uintptr_t)value - (uintptr_t)value % sizeof(Entry);
     return (Entry *)addr - entries;
@@ -581,7 +620,12 @@ public:
 #endif
   }
 
-  // Return a list of map entries sorted in a deterministic order.
+  // Returns the entries in the given shard in a deterministic order.
+  //
+  // Linear probing fills the same set of buckets whatever the order
+  // keys were inserted in, but which of two colliding keys got the
+  // earlier bucket depends on it, so each run of adjacent occupied
+  // buckets is sorted by key.
   std::vector<Entry *> get_sorted_entries(i64 shard_idx) {
     if (nbuckets == 0)
       return {};
@@ -623,6 +667,7 @@ public:
     return vec;
   }
 
+  // Returns all map entries in deterministic order.
   std::vector<Entry *> get_sorted_entries_all() {
     std::vector<std::vector<Entry *>> vec(NUM_SHARDS);
     tbb::parallel_for((i64)0, NUM_SHARDS, [&](i64 i) {
@@ -649,6 +694,8 @@ private:
     u64 begin = hash & (nbuckets - 1);
     u64 mask = nbuckets / NUM_SHARDS - 1;
 
+    // The probe sequence visits the buckets of one shard, starting from
+    // the hash's home bucket and wrapping around within the shard.
     for (i64 i = 0; i < MAX_RETRY; i++) {
       u64 idx = (begin & ~mask) | ((begin + i) & mask);
       Entry &ent = entries[idx];
@@ -1072,6 +1119,12 @@ void get_random_bytes(u8 *buf, i64 size);
 // hyperloglog.cc
 //
 
+// HyperLogLog estimates the number of distinct values in a stream of
+// hashes.
+//
+// Each hash selects a register (bucket) by its low bits; the register keeps
+// the longest run of leading zeros seen, plus one. The estimate is a scaled
+// harmonic mean of the registers.
 class HyperLogLog {
 private:
   static constexpr i64 NBUCKETS = 2048;
@@ -1104,6 +1157,9 @@ private:
 // aho-corasick.cc
 //
 
+// AhoCorasick is an Aho-Corasick automaton for patterns that are plain
+// substring searches, such as `*foo*`, `foo*` or `*foo`. Anchors are
+// represented by a NUL byte at the beginning or end of the pattern.
 class AhoCorasick {
 public:
   bool add(std::string_view pat, i64 val);
@@ -1132,6 +1188,8 @@ private:
   i64 max_value = -1;
 };
 
+// Glob is a set of glob patterns, each associated with a value. Looking up
+// a string returns the largest value among the matching patterns, or -1.
 class Glob {
 public:
   bool add(std::string_view pat, i64 val);
@@ -1212,6 +1270,8 @@ inline std::string path_filename(std::string_view path) {
   return std::filesystem::path(path).filename().string();
 }
 
+// Normalizes a path lexically, resolving `.` and `..` components without
+// consulting the file system.
 inline std::string path_clean(std::string_view path) {
   return std::filesystem::path(path).lexically_normal().string();
 }
@@ -1236,6 +1296,9 @@ std::vector<u8> crc32_solve(u32 current, u32 desired);
 // compress.cc
 //
 
+// Compressor compresses data with zlib or zstd at a fixed level, using all
+// threads. The compressed data is kept as shards until it is written to the
+// output.
 class Compressor {
 public:
   virtual void write_to(u8 *buf) = 0;
@@ -1265,11 +1328,11 @@ public:
 // tar.cc
 //
 
-// TarFile is a class to create a tar file.
+// TarWriter creates the archive used by --repro.
 //
-// If you pass `--repro` to mold, mold collects all input files and
-// put them into `<output-file-path>.repro.tar`, so that it is easy to
-// run the same command with the same command line arguments.
+// If you pass `--repro` to mold, mold collects all input files and puts
+// them into `<output-file-path>.repro.tar`, making it easy to run the same
+// command with the same command-line arguments.
 class TarWriter {
 public:
   static std::unique_ptr<TarWriter>

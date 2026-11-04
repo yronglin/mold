@@ -2,6 +2,9 @@
 // a shared object file but an ASCII text file containing a linker
 // script to include a "real" libc.so file. Therefore, we need to
 // support a (very limited) subset of the linker script language.
+//
+// The supported subset also includes `OUTPUT_FORMAT`, symbol assignments,
+// version scripts and dynamic lists.
 
 #include "mold.h"
 
@@ -26,6 +29,7 @@ static std::string_view get_line(std::string_view input, const char *pos) {
   return input.substr(start, end - start);
 }
 
+// Reports a syntax error, pointing at the offending token.
 template <typename E>
 void Script<E>::error(std::string_view pos, std::string msg) {
   std::string_view input = mf->get_contents();
@@ -153,6 +157,7 @@ static bool is_in_sysroot(Context<E> &ctx, std::string path) {
   return rel != "." && !rel.starts_with("../");
 }
 
+// Opens a file named by a script.
 template <typename E>
 MappedFile *Script<E>::resolve_path(std::string_view tok, bool check_target) {
   std::string str(unquote(tok));
@@ -258,6 +263,9 @@ void Script<E>::parse_linker_script() {
   }
 }
 
+// Returns the target name of the output of a script, which is guessed
+// from its `OUTPUT_FORMAT` command or from the first file named by its
+// `INPUT` or `GROUP` command.
 template <typename E>
 std::string_view Script<E>::get_script_output_type() {
   std::call_once(once, [&] { tokenize(); });
@@ -280,6 +288,7 @@ std::string_view Script<E>::get_script_output_type() {
   return "";
 }
 
+// Matches a `global:` or `local:` label.
 static bool read_label(std::span<std::string_view> &tok, std::string label) {
   if (tok.size() >= 1 && tok[0] == label + ":") {
     tok = tok.subspan(1);
@@ -375,6 +384,8 @@ Script<E>::read_version_script(std::span<std::string_view> tok) {
     tok = skip(tok, "{");
     tok = read_version_script_commands(tok, ver_str, ver_idx, true, false);
     tok = skip(tok, "}");
+
+    // A parent version, e.g. `} VER_1.0;`
     if (!tok.empty() && tok[0] != ";")
       tok = tok.subspan(1);
     tok = skip(tok, ";");

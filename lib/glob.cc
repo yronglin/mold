@@ -90,6 +90,7 @@ std::optional<Glob::Pattern> Glob::Pattern::compile(std::string_view pat,
         tokens.emplace_back(STAR);
       break;
     case '\\':
+      // A backslash takes the next character as itself.
       if (pat.empty())
         return {};
       if (tokens.empty() || tokens.back().kind != STRING)
@@ -268,6 +269,7 @@ static bool is_literal(std::string_view pat) {
   return pat.find_first_of("*?[\\") == pat.npos;
 }
 
+// Adds a pattern. Returns false if the pattern is malformed.
 bool Glob::add(std::string_view pat, i64 val) {
   assert(val >= 0);
   assert(!is_compiled);
@@ -309,6 +311,7 @@ bool Glob::add(std::string_view pat, i64 val) {
   return false;
 }
 
+// Returns the largest value of a matching pattern, or -1 if none match.
 i64 Glob::find(std::string_view str) {
   std::call_once(once, [&] {
     // If the same name was added more than once, keep only the entry

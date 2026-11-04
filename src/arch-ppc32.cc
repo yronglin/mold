@@ -1,5 +1,5 @@
 // This file implements the PowerPC 32-bit ISA. For 64-bit PowerPC, see
-// arch-ppc64v1.cpp and arch-ppc64v2.cpp.
+// arch-ppc64v1.cc and arch-ppc64v2.cc.
 //
 // PPC32 is a RISC ISA. It has 32 general-purpose registers (GPRs).
 // r0, r11 and r12 are reserved for static linkers, so we can use these
@@ -7,24 +7,24 @@
 // has a few special registers. Notable ones are LR which holds a return
 // address and CTR which we can use to store a branch target address.
 //
-// It feels that the PPC32 psABI is unnecessarily complicated at first
-// glance, but that is mainly stemmed from the fact that the ISA lacks
-// PC-relative load/store instructions. Since machine instructions cannot
-// load data relative to its own address, it is not straightforward to
-// support position-independent code (PIC) on PPC32.
+// The PPC32 psABI feels unnecessarily complicated at first glance, but
+// that mainly stems from the fact that the ISA lacks PC-relative
+// load/store instructions. Since machine instructions cannot load data
+// relative to their own address, it is not straightforward to support
+// position-independent code (PIC) on PPC32.
 //
 // A position-independent function typically contains the following code
 // in the prologue to obtain its own address:
 //
 //    mflr  r0        // save the current return address to %r0
 //    bcl   20, 31, 4 // call the next instruction as if it were a function
-//    mtlr  r12       // save the return address to %r12
+//    mflr  r12       // save the return address to %r12
 //    mtlr  r0        // restore the original return address
 //
 // An object file compiled with -fPIC contains a data section named
 // `.got2` to store addresses of locally-defined global variables and
-// constants. A PIC function usually computes its .got2+0x8000 and set it
-// to %r30. This scheme allows the function to access global objects
+// constants. A PIC function usually computes its .got2+0x8000 and stores
+// it in %r30. This scheme allows the function to access global objects
 // defined in the same input file with a single %r30-relative load/store
 // instruction with a 16-bit offset, given that .got2 is smaller than
 // 0x10000 (or 65536) bytes.
@@ -35,7 +35,7 @@
 //
 // Technically, we can reuse a %r30 value in our PLT if we create a PLT
 // _for each input file_ (that's what GNU ld seems to be doing), but that
-// doesn't seems to be worth its complexity. Our PLT simply doesn't rely
+// doesn't seem to be worth its complexity. Our PLT simply doesn't rely
 // on a %r30 value.
 //
 // https://github.com/rui314/psabi/blob/main/ppc32.pdf
@@ -57,21 +57,21 @@ static u64 higha(u64 x) { return ((x + 0x8000) >> 16) & 0xffff; }
 template <>
 void write_plt_header(Context<E> &ctx, u8 *buf) {
   constexpr ub32 insn[] = {
-    // Get the address of this PLT section
+    // Get the address of this PLT section.
     0x7c08'02a6, //    mflr    r0
     0x429f'0005, //    bcl     20, 31, 4
     0x7d88'02a6, // 1: mflr    r12
     0x7c08'03a6, //    mtlr    r0
 
-    // Compute the runtime address of GOTPLT+12
+    // Compute the runtime address of GOTPLT+12.
     0x3d8c'0000, //    addis   r12, r12, (GOTPLT - 1b)@higha
     0x398c'0000, //    addi    r12, r12, (GOTPLT - 1b)@lo
 
-    // Compute the PLT entry offset
+    // Compute the PLT entry offset.
     0x7d6c'5850, //    sub     r11, r11, r12
     0x1d6b'0003, //    mulli   r11, r11, 3
 
-    // Load GOTPLT[2] and branch to GOTPLT[1]
+    // Load GOTPLT[2] and branch to GOTPLT[1].
     0x800c'fff8, //    lwz     r0,  -8(r12)
     0x7c09'03a6, //    mtctr   r0
     0x818c'fffc, //    lwz     r12, -4(r12)
@@ -90,6 +90,9 @@ void write_plt_header(Context<E> &ctx, u8 *buf) {
   loc[5] |= lo(ctx.gotplt->shdr.sh_addr - ctx.plt->shdr.sh_addr + 4);
 }
 
+// A PLT entry, also used as a thunk to a PLT symbol: it materializes
+// its own address, loads the destination from the GOT entry at a
+// known offset and jumps there.
 static constexpr ub32 plt_entry[] = {
   // Get the address of this PLT entry
   0x7c08'02a6, // mflr    r0
@@ -190,6 +193,7 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
     case R_PPC_ADDR30:
       *(ub32 *)loc |= bits(S + A, 31, 2) << 2;
       break;
+    // PLT16/PLT32 relocations are relative to the file's .got2.
     case R_PPC_PLT16_LO:
       *(ub16 *)loc = lo(G + GOT - A - GOT2);
       break;

@@ -164,6 +164,8 @@ private:
 // signal-unix.cc
 //
 
+// The temporary output file being written, which cleanup() removes on a
+// fatal error or signal.
 inline char *output_tmpfile = nullptr;
 inline u8 *output_buffer_start = nullptr;
 inline u8 *output_buffer_end = nullptr;
@@ -185,6 +187,7 @@ public:
   void close_fd();
   void reopen_fd(const std::string &path);
 
+  // Returns a view of a member of this archive.
   template <typename E>
   MappedFile *slice(Context<E> &ctx, std::string name, u64 start, u64 size) {
     MappedFile *mf = new MappedFile;
@@ -201,6 +204,7 @@ public:
     return std::string_view((char *)data, size);
   }
 
+  // Returns the offset of this slice within its top-level archive file.
   i64 get_offset() const {
     return parent ? (data - parent->data + parent->get_offset()) : 0;
   }
@@ -222,11 +226,21 @@ public:
     return name;
   }
 
+  // The path this file was opened by, which already has --chroot applied,
+  // or the member name for a slice of an archive.
   std::string name;
+
   u8 *data = nullptr;
   i64 size = 0;
+
+  // False if the file was found by searching library paths (-l), which
+  // affects how a shared library's soname defaults.
   bool given_fullpath = true;
+
+  // The archive this file is a member of.
   MappedFile *parent = nullptr;
+
+  // The thin archive this file is a member of.
   MappedFile *thin_parent = nullptr;
 
   // True if `data` is a memory mapping of the file rather than a copy of
@@ -245,6 +259,8 @@ public:
 
 MappedFile *open_file_impl(const std::string &path, std::string &error);
 
+// Opens an input file, applying --chroot to absolute paths. Returns
+// nullptr if the file doesn't exist.
 template <typename E>
 MappedFile *open_file(Context<E> &ctx, std::string path) {
   if (path.starts_with('/') && !ctx.arg.chroot.empty())
@@ -314,6 +330,7 @@ struct __attribute__((aligned(4))) SectionFragment {
 // memory.
 template <typename E>
 struct SymbolAux {
+  // Zero-based table indices, with -1 meaning no entry.
   i32 got_idx = -1;
   i32 gottp_idx = -1;
   i32 tlsgd_idx = -1;
@@ -335,6 +352,7 @@ struct SymbolAux {
 template <typename E>
 class Thunk {};
 
+// A block of branch stubs placed between input sections.
 template <needs_thunk E>
 class Thunk<E> {
 public:
@@ -348,9 +366,15 @@ public:
   void copy_buf(Context<E> &ctx);
 
   OutputSection<E> &output_section;
+
+  // Offset within the output section.
   i64 offset;
+
   std::vector<Symbol<E> *> symbols;
+
+  // Offset of each stub within the thunk; the last entry is the size.
   std::vector<i64> offsets;
+
   std::string name;
 };
 
@@ -436,6 +460,7 @@ struct CieRecord {
     : file(file), input_section(isec), input_offset(input_offset),
       rel_idx(rel_idx), rels(rels), contents(file.get_string(ctx, isec.shdr())) {}
 
+  // The size of the record: its length field plus the field itself.
   i64 size() const {
     return *(U32<E> *)(contents.data() + input_offset) + 4;
   }
@@ -453,19 +478,32 @@ struct CieRecord {
   }
 
   ObjectFile<E> &file;
+
+  // The .eh_frame input section containing this record.
   InputSection<E> &input_section;
+
   u32 input_offset = -1;
   u32 output_offset = -1;
+
+  // Index of the first relocation in `rels` that applies to this record.
   u32 rel_idx = -1;
+
   u32 icf_idx = -1;
+
+  // The relocations of the .eh_frame section, shared by this CIE and its
+  // FDEs.
   std::span<ElfRel<E>> rels;
+
+  // The contents of the .eh_frame section, which FDEs also consult through
+  // their CIE.
   std::string_view contents;
 
   // The size of the initial_location and address_range fields of FDEs
   // associated with this CIE. Initialized by parse_ehframe().
   u8 fde_ptr_size = -1; // 4 or 8
 
-  // For deduplication
+  // For deduplication. True if this is the representative of its
+  // equivalence class.
   bool is_leader = false;
 };
 
@@ -477,6 +515,7 @@ struct FdeRecord {
   FdeRecord(u32 input_offset, u32 rel_idx)
     : input_offset(input_offset), rel_idx(rel_idx) {}
 
+  // The size of the record: its length field plus the field itself.
   i64 size(ObjectFile<E> &file) const {
     return *(U32<E> *)(file.cies[cie_idx].contents.data() + input_offset) + 4;
   }
@@ -523,6 +562,8 @@ struct InputSectionExtras {};
 
 template <is_arm32 E>
 struct InputSectionExtras<E> {
+  // ARM32's link from a code section to its .ARM.exidx section, or null if
+  // there is no associated section.
   ArenaPtr<InputSection<E>> exidx;
 };
 
@@ -560,10 +601,20 @@ public:
 
   void uncompress(Context<E> &ctx);
   void copy_contents_to(Context<E> &ctx, u8 *buf, i64 sz);
+
+  // Scans the relocations of an allocated section to find symbols that
+  // need GOT, PLT or dynamic relocation entries.
   void scan_relocations(Context<E> &ctx);
+
   void write_to(Context<E> &ctx, u8 *buf);
+
+  // Applies relocations to a copy of an allocated section's contents.
   void apply_reloc_alloc(Context<E> &ctx, u8 *base);
+
+  // Applies relocations to a copy of a non-allocated section's contents.
   void apply_reloc_nonalloc(Context<E> &ctx, u8 *base);
+
+  // Marks the section dead. If it was alive, its FDEs are killed too.
   void kill();
 
   static constexpr u8 IS_ALIVE = 1 << 0;
@@ -578,16 +629,27 @@ public:
   bool is_uncompressed() const { return flags & IS_UNCOMPRESSED; }
   bool is_icf_removed() const { return flags & IS_ICF_REMOVED; }
 
+  // Marks the section visited. Returns true if it was not visited before.
   bool visit();
+
   void set_visited() { flags |= IS_VISITED; }
   void set_address_taken() { flags |= IS_ADDRESS_TAKEN; }
   void set_uncompressed() { flags |= IS_UNCOMPRESSED; }
   void set_icf_removed() { flags |= IS_ICF_REMOVED; }
 
+  // Sort key for deterministic ordering: files are ordered as they appear
+  // on the command line, and sections in the order within a file.
   i64 get_priority() const;
+
   u64 get_addr() const;
   std::string_view name() const;
+
+  // Returns the section contents as they are in the input file, which may
+  // still be compressed, or the uncompressed contents if uncompress() has
+  // run. For a section that is not compressed, the returned view includes
+  // bytes that relaxation removed, so it can be longer than `sh_size`.
   std::string_view get_contents() const;
+
   ElfShdr<E> &shdr() const;
   std::span<ElfRel<E>> get_rels(Context<E> &ctx) const;
 
@@ -601,6 +663,9 @@ public:
   bool record_undef_error(Context<E> &ctx, const ElfRel<E> &rel);
   void check_range(Context<E> &ctx, i64 i, i64 val, i64 lo, i64 hi);
 
+  // For a relocation in a non-allocated section, finds the section
+  // fragment it refers to and the offset within that fragment, if the
+  // relocation refers to a mergeable section.
   std::pair<SectionFragment<E> *, i64>
   get_fragment(Context<E> &ctx, const ElfRel<E> &rel);
 
@@ -622,8 +687,16 @@ public:
   };
 
   i64 sh_size = -1;
+
+  // Index of the first FDE for this section in the owner file's `fdes`, or
+  // -1 if there is none. FDEs for one input section are contiguous, and the
+  // last one has `is_last` set.
   i32 fde_begin = -1;
+
   i32 shndx = -1;
+
+  // Index of the relocation section (SHT_REL, SHT_RELA or SHT_CREL) in the
+  // owner file that applies to this section, or -1 if there is none.
   i32 relsec_idx = -1;
 
   // UINT16_MAX means that name() must scan the remaining suffix.
@@ -689,6 +762,7 @@ Chunk<E> *find_chunk(Context<E> &ctx, u32 sh_type);
 template <typename E>
 Chunk<E> *find_chunk(Context<E> &ctx, std::string_view name);
 
+// Machine-specific e_flags of the output file.
 template <typename E>
 u64 get_eflags(Context<E> &ctx) {
   return 0;
@@ -711,20 +785,45 @@ template <typename E>
 class __attribute__((aligned(4))) Chunk {
 public:
   virtual ~Chunk() = default;
+
+  // Returns true if the chunk is one of the ELF headers (the ELF header,
+  // the program header or the section header) rather than a section.
   virtual bool is_header() { return false; }
+
   virtual OutputSection<E> *to_osec() { return nullptr; }
   virtual RelocSection<E> *to_reloc_sec() { return nullptr; }
+
+  // Computes a chunk's size from its contents. For output sections, this
+  // also assigns offsets to the member input sections.
   virtual void compute_section_size(Context<E> &ctx) {}
+
+  // Writes a chunk's contents into its region of the output file.
   virtual void copy_buf(Context<E> &ctx) {}
+
+  // Writes a chunk's contents to a given buffer rather than to the output
+  // file. This is used, for example, to compress a section's contents.
   virtual void write_to(Context<E> &ctx, u8 *buf) { unreachable(); }
+
+  // Updates a chunk's section header for the current layout. This is
+  // called at least twice: once to size the section, and again after
+  // section indices are known.
   virtual void update_shdr(Context<E> &ctx) {}
+
+  // Returns the number of dynamic relocations a chunk emits.
   virtual i64 get_num_dynrels(Context<E> &) const { return 0; }
+
+  // Returns the offsets, relative to the chunk, of the base relocations
+  // that can be encoded in RELR form. OutputSection also marks such
+  // relocations so that they are not emitted to .rel.dyn.
   virtual std::vector<u64> get_relr_offsets(Context<E> &) { return {}; }
 
+  // Writes a chunk's dynamic relocations to the given buffer.
   virtual void write_dynrels(Context<E> &, ElfRel<E> *) const { unreachable(); }
 
   std::string_view name;
   ElfShdr<E> shdr = { .sh_addralign = 1 };
+
+  // Index in the output section header table; 0 for headers.
   i64 shndx = 0;
   i64 num_dynrels = 0;
   i64 num_relrs = 0;
@@ -734,10 +833,10 @@ public:
   // For --gdb-index
   bool is_compressed = false;
 
-  // Some synethetic sections add local symbols to the output.
-  // For example, range extension thunks adds function_name@thunk
-  // symbol for each thunk entry. The following members are used
-  // for such synthesizing symbols.
+  // Some synthetic sections add local symbols to the output. For example,
+  // range extension thunks add a function_name$thunkN symbol for each
+  // thunk entry. The following members are used for such synthesized
+  // symbols.
   virtual void compute_symtab_size(Context<E> &ctx) {}
   virtual void populate_symtab(Context<E> &ctx) {}
 
@@ -804,8 +903,8 @@ public:
 };
 
 // .interp contains the pathname of a dynamic linker. Dynamically-linked
-// executables have the section. If exists, the kernel runs the program at
-// the specified path with the executable pathname as an argument,
+// executables have the section. If it exists, the kernel runs the program
+// at the specified path with the executable pathname as an argument,
 // allowing the dynamic linker to run the program.
 template <typename E>
 class InterpSection : public Chunk<E> {
@@ -820,12 +919,13 @@ public:
   void copy_buf(Context<E> &ctx) override;
 };
 
+// How a word-size absolute relocation is resolved.
 enum AbsRelKind {
-  ABS_REL_NONE,
-  ABS_REL_BASEREL,
-  ABS_REL_RELR,
-  ABS_REL_IFUNC,
-  ABS_REL_DYNREL,
+  ABS_REL_NONE,    // The value is known at link time
+  ABS_REL_BASEREL, // A base relocation, applied by the loader
+  ABS_REL_RELR,    // A base relocation encoded in .relr.dyn
+  ABS_REL_IFUNC,   // An IFUNC relocation
+  ABS_REL_DYNREL,  // A symbolic dynamic relocation
 };
 
 // Represents a word-size absolute relocation (e.g. R_X86_64_64)
@@ -872,7 +972,13 @@ public:
   std::vector<std::unique_ptr<Thunk<E>>> thunks;
   std::unique_ptr<RelocSection<E>> reloc_sec;
   std::vector<AbsRel<E>> abs_rels;
+
+  // The number of dynamic relocations before each DYNREL_SHARD_SIZE-sized
+  // shard of `abs_rels`, followed by the total.
   std::vector<i64> dynrel_offsets;
+
+  // The number of RELR-encoded relocations before each shard of
+  // `abs_rels`, followed by the total.
   std::vector<i64> relr_offsets;
   Atomic<u32> sh_flags;
 };
@@ -940,8 +1046,8 @@ public:
   static constexpr i64 ENTRY_SIZE = (is_ppc64v1<E> ? 3 : 1) * sizeof(Word<E>);
 };
 
-// .plt contains linker-synthesized stub code that acts as if they are
-// functions. They are in fact immediately branches to real function entry
+// .plt contains linker-synthesized stubs that act as if they were
+// functions. In fact, they immediately branch to real function entry
 // points. .plt is used as a stub for runtime lazy symbol resolution.
 template <typename E>
 class PltSection : public Chunk<E> {
@@ -977,8 +1083,8 @@ public:
 
 // .plt.got is similar to .plt but doesn't support lazy symbol resolution.
 // If we have the same symbol already in .got, resolving the same symbol
-// lazily for .plt is just waste of time. Therefore, in such case, we use
-// .plt.got for that symbol instead.
+// lazily for .plt is just a waste of time. Therefore, in such a case, we
+// use .plt.got for that symbol instead.
 template <typename E>
 class PltGotSection : public Chunk<E> {
 public:
@@ -1022,7 +1128,7 @@ public:
   void copy_buf(Context<E> &ctx) override;
 };
 
-// .rel.dyn contains relocation infromation for other sections.
+// .rel.dyn contains relocation information for other sections.
 template <typename E>
 class RelDynSection : public Chunk<E> {
 public:
@@ -1052,37 +1158,37 @@ public:
   bool keep_android_size = false;
 };
 
-// .relr.dyn is a relatively new section to contain base relocation
+// .relr.dyn is a relatively new section for storing base relocation
 // information.
 //
-// A relocatable executable/DSO contains a lot of certain type of
-// relocation entries, called "base relocations", to specify the locations
-// of pointers in the FILE that need to be adjusted according to the
+// A relocatable executable/DSO contains a lot of relocation entries of a
+// certain type, called "base relocations", to specify the locations
+// of pointers in the file that need to be adjusted according to the
 // desired load address and the actual load address. As an example,
 // consider the following C code.
 //
 //   extern int foo;
 //   int *bar = &foo;
 //
-// If an executable containing the above code is built as relocatable
-// executable, meaning that the executable can be loaded not to a specific
+// If an executable containing the above code is built as a relocatable
+// executable, meaning that the executable can be loaded not at a specific
 // address in memory but anywhere in the virtual address space, then the
 // pointer `bar`'s address is not known at link-time.
 //
-// The linker temporarily links the executable to a base address, record
-// that information to the ELF header, and emits dynamic relocations to
-// refer to the location of `bar`. At runtime, the loader adds the
-// difference of the expected load address and the actual one to the
-// pointer value to fix the pointer value.
+// The linker temporarily links the executable to a base address, records
+// that information in the program header, and emits dynamic relocations to
+// refer to the location of `bar`. At runtime, the loader fixes the pointer
+// by adding the difference between the expected load address and the
+// actual one to its value.
 //
 // Relocatable executables/DSOs usually contain a fairly large number of
-// base relocations. In particular, C++ virtual function table is an array
+// base relocations. In particular, a C++ virtual function table is an array
 // of statically-initialized pointers which need base relocations.
 //
 // Notice that base relocations don't contain symbol information. They
 // need only pointer locations in the ELF file that need fixing at
-// load-time. Therefore, storing that information to the usual ELF
-// relocation table is waste of space.
+// load-time. Therefore, storing that information in the usual ELF
+// relocation table is a waste of space.
 //
 // .relr.dyn is designed to store base relocations in a space-efficient way.
 template <typename E>
@@ -1099,10 +1205,10 @@ public:
   void copy_buf(Context<E> &ctx) override;
 };
 
-// .strtab is referenced by .strtab and contains symbol names. Note that
+// .strtab is referenced by .symtab and contains symbol names. Note that
 // .strtab is not needed at runtime; one can remove the section from an
-// ELF file without breaking it. Strings that runtime accesses are stored
-// in .dynstr.
+// ELF file without breaking it. Strings that the runtime accesses are
+// stored in .dynstr.
 template <typename E>
 class StrtabSection : public Chunk<E> {
 public:
@@ -1199,13 +1305,14 @@ public:
   void copy_buf(Context<E> &ctx) override;
 };
 
-// .symtab_shndx is a parallel table for .symtab to contain section
+// .symtab_shndx is a table parallel to .symtab that contains section
 // indices for symbols.
 //
-// Symbol table entry contains a field for section index, but that's only
-// 16 bit in size, so it cannot refer to a section whose section index is
-// greater than 65535. We use .symtab_shndx for ELF files containing a lot
-// of sections.
+// A symbol table entry contains a field for the section index, but that's
+// only 16 bits in size, and the values from SHN_LORESERVE (= 65280) up are
+// reserved for special indices, so it cannot refer to a section whose
+// section index is 65280 or greater. We use .symtab_shndx for ELF files
+// containing a lot of sections.
 //
 // Use of this section is exceptional. Most ELF files don't contain one.
 template <typename E>
@@ -1237,6 +1344,8 @@ public:
       symbols.resize(1);
 
     if (sym->get_dynsym_idx(ctx) == -1) {
+      // Mark the symbol as queued before sort_dynsyms() assigns its real
+      // index.
       sym->aux->dynsym_idx = -2;
       symbols.push_back(sym);
     }
@@ -1245,6 +1354,7 @@ public:
   void update_shdr(Context<E> &ctx) override;
   void copy_buf(Context<E> &ctx) override;
 
+  // Index 0 is the null symbol.
   std::vector<Symbol<E> *> symbols;
   i64 dynstr_offset = -1;
 
@@ -1256,13 +1366,13 @@ public:
 };
 
 // .hash contains an on-disk hash table for .dynsym so that the runtime
-// can look up a symbol name quickly without scannin all entries in
+// can look up a symbol name quickly without scanning all entries in
 // .dynsym.
 //
 // Quickly identifying whether or not a .dynsym contains a given symbol is
 // especially important for ELF because of the dynamic symbol lookup rule
-// for ELF. In ELF, each dynamic symbol is not searched from a specific
-// library but from all the ELF files loaded to memory. Therefore,
+// for ELF. In ELF, a dynamic symbol is not looked up in a specific
+// library but in all the ELF files loaded into memory. Therefore,
 // minimizing the cost of each dynamic symbol lookup is important.
 template <typename E>
 class HashSection : public Chunk<E> {
@@ -1279,7 +1389,7 @@ public:
   void copy_buf(Context<E> &ctx) override;
 
 private:
-  // Even though u32 should suffice as an etnry size for all targets,
+  // Even though u32 should suffice as an entry size for all targets,
   // s390x uses u64. It looks like a spec bug, but we need to follow
   // suit for the sake of binary compatibility.
   using Entry = std::conditional_t<is_s390x<E>, U64<E>, U32<E>>;
@@ -1330,6 +1440,7 @@ public:
   void write_to(Context<E> &ctx, u8 *buf) override;
   void print_stats(Context<E> &ctx);
 
+  // The input sections merged into this one.
   std::vector<MergeableSection<E> *> members;
 
   ConcurrentMap<SectionFragment<E>> map;
@@ -1339,6 +1450,9 @@ public:
 private:
   MergedSection(std::string_view name, i64 flags, i64 type, i64 entsize);
 
+  // The start offsets of the 32-bit parts of all hash-table shards,
+  // followed by those of the unrestricted parts of all shards, followed by
+  // the section size. See assign_offsets().
   std::vector<i64> shard_offsets;
 };
 
@@ -1359,6 +1473,9 @@ public:
   void construct(Context<E> &ctx);
   void copy_buf(Context<E> &ctx) override;
 
+  // Applies a relocation in the reconstructed .eh_frame section. `offset`
+  // is the relocated location's offset within .eh_frame and `val` the
+  // resolved value.
   void apply_eh_reloc(Context<E> &ctx, InputSection<E> &isec,
                       const ElfRel<E> &rel, u64 offset, u64 val);
 
@@ -1367,10 +1484,10 @@ public:
 };
 
 // .eh_frame_hdr is a lookup table for .eh_frame. Entries in .eh_frame_hdr
-// are sorted by their dcorresponding function addresses, so tha the
+// are sorted by their corresponding function addresses, so that the
 // runtime can quickly find an exception-handling record for the current
 // function by binary search. Without .eh_frame_hdr, the runtime would
-// have had to do linear search in .eh_frame.
+// have to do a linear search in .eh_frame.
 template <typename E>
 class EhFrameHdrSection : public Chunk<E> {
 public:
@@ -1390,9 +1507,9 @@ public:
   i64 num_fdes = 0;
 };
 
-// EhFrameRelocSection contains relcoation records for .eh_frame. We use
+// EhFrameRelocSection contains relocation records for .eh_frame. We use
 // this class only for relocatable outputs (i.e. the output is an .o file
-// as opposed to an executable or a .so file.)
+// as opposed to an executable or a .so file).
 template <typename E>
 class EhFrameRelocSection : public Chunk<E> {
 public:
@@ -1428,6 +1545,8 @@ public:
   void copy_buf(Context<E> &ctx) override;
 
   SFrameHeader<E> hdr = {};
+
+  // The FDEs that describe live functions.
   std::vector<SFrameFde<E> *> fdes;
 };
 
@@ -1509,9 +1628,9 @@ public:
   std::vector<u8> contents;
 };
 
-// .gnu.version contains a parallel table for .dynsym to specify symbol
-// versions of defined symbols. This section appears only in .so files,
-// and it specifies the symbol version for each defined dynamic symbol.
+// .gnu.version_d contains the symbol versions defined by the output file.
+// For each defined dynamic symbol, .gnu.version holds the index of its
+// version in this section.
 template <typename E>
 class VerdefSection : public Chunk<E> {
 public:
@@ -1530,8 +1649,8 @@ public:
 };
 
 // .note.gnu.build-id contains an identifier for an output ELF file. The
-// contents of the section is usually a cryptogrpahic hash of the output
-// file itself to guarantee uniqueness of build-id.
+// contents of the section are usually a cryptographic hash of the output
+// file itself to guarantee the uniqueness of the build ID.
 template <typename E>
 class BuildIdSection : public Chunk<E> {
 public:
@@ -1549,8 +1668,8 @@ public:
   std::vector<u8> contents;
 };
 
-// .note.package is an optional hint section that can contain arbitrary
-// string. Package managers, such as dpkg or rpm, uses the section to
+// .note.package is an optional hint section that can contain an arbitrary
+// string. Package managers, such as dpkg or rpm, use the section to
 // embed package metadata into each ELF file so that it is easy to find
 // the origin of an ELF file without any additional information.
 template <typename E>
@@ -1567,8 +1686,8 @@ public:
   void copy_buf(Context<E> &ctx) override;
 };
 
-// .note.gnu.property section contains an additional runtime information
-// about ISA variant.
+// The .note.gnu.property section contains additional runtime information
+// about the ISA variant.
 template <typename E>
 class NotePropertySection : public Chunk<E> {
 public:
@@ -1601,9 +1720,9 @@ private:
   std::vector<Entry> contents;
 };
 
-// .gnu_debuglink section contains a pathname and its CRC32 checksum for a
-// separate debug info file. gdb can read the section to read debug info
-// from an external file.
+// The .gnu_debuglink section contains the pathname and CRC32 checksum of
+// a separate debug info file. gdb can use the section to read debug info
+// from the external file.
 template <typename E>
 class GnuDebuglinkSection : public Chunk<E> {
 public:
@@ -1648,7 +1767,8 @@ private:
 };
 
 // RelocSection represents a relocation table for an output file.
-// This is used only for the relocatable output (i.e. the `-r` output).
+// These tables are emitted for `-r` and for final links with
+// `--emit-relocs`.
 template <typename E>
 class RelocSection : public Chunk<E> {
 public:
@@ -1659,6 +1779,8 @@ public:
 
 private:
   OutputSection<E> &output_section;
+
+  // The index of the first relocation of each member.
   std::vector<i64> offsets;
 };
 
@@ -1704,6 +1826,7 @@ private:
 // output-file.cc
 //
 
+// An output file, either memory-mapped or buffered in memory.
 template <typename E>
 class OutputFile {
 public:
@@ -1732,6 +1855,9 @@ protected:
     : path(path), filesize(filesize), is_mmapped(is_mmapped) {}
 };
 
+// MallocOutputFile assembles the output in memory and writes it out at
+// the end. It is used for anything other than a regular file, such as a
+// device, a pipe or standard output. See OutputFile<E>::open().
 template <typename E>
 class MallocOutputFile : public OutputFile<E> {
 public:
@@ -1780,6 +1906,11 @@ public:
     }
 
     fwrite(this->buf, this->filesize, 1, fp);
+
+    // When writing to stdout, this closes the descriptor too: the parent
+    // process may already have exited, and a program that then runs the
+    // output would fail with ETXTBSY while this process still holds it
+    // open for writing.
     fclose(fp);
   }
 
@@ -1833,6 +1964,7 @@ struct ComdatGroupRef {
   u32 is_owner : 1 = false;
 };
 
+// Fragment metadata for an input section with the SHF_MERGE flag.
 template <typename E>
 class MergeableSection {
 public:
@@ -1841,8 +1973,11 @@ public:
 
   void split_contents(Context<E> &ctx);
   void resolve_contents(Context<E> &ctx);
+
+  // Finds the fragment containing `offset` and the offset within it.
   std::pair<SectionFragment<E> *, i64>
   get_fragment(i64 offset, i64 *hint = nullptr);
+
   std::string_view get_contents(i64 idx);
 
   MergedSection<E> &parent;
@@ -1978,11 +2113,17 @@ public:
   MappedFile *mf = nullptr;
   std::span<ElfShdr<E>> elf_sections;
   std::span<ElfSym<E>> elf_syms;
+
+  // The symbol for each entry of `elf_syms`, plus any fragment dummies
+  // appended after them by ObjectFile<E>::reattach_section_pieces().
   std::vector<ArenaPtr<Symbol<E>>, ArenaAllocator<ArenaPtr<Symbol<E>>>> symbols;
   i64 first_global = 0;
 
   std::string filename;
   bool is_dso = false;
+
+  // Position in the command line; lower is earlier. Symbol resolution
+  // breaks ties in favor of earlier files.
   i64 priority;
 
   // A file is reachable if it is to be included in the output. Files
@@ -2017,6 +2158,9 @@ public:
   u64 strtab_size = 0;
 
   // For --emit-relocs
+  //
+  // Output symbol table index of each symbol, relative to the start of
+  // the file's local or global block, or -1 if not written.
   std::vector<i32> output_sym_indices;
 
 protected:
@@ -2026,6 +2170,7 @@ protected:
 template <typename E>
 struct ObjectFileExtras {};
 
+// RISC-V attributes read from .riscv.attributes.
 template <is_riscv E>
 struct ObjectFileExtras<E> {
   std::optional<i64> stack_align;
@@ -2035,6 +2180,7 @@ struct ObjectFileExtras<E> {
 
 template <>
 struct ObjectFileExtras<PPC32> {
+  // The file's .got2 section
   ArenaPtr<InputSection<PPC32>> got2;
 };
 
@@ -2076,10 +2222,15 @@ public:
 
   std::string archive_name;
 
+  // The sections by section header index, plus sections synthesized
+  // for common symbols.
   InputSectionVector<E> sections;
   bool sections_parsed = false;
 
+  // Section headers synthesized for common symbols. Their section
+  // indices follow those of the file's own section headers.
   std::vector<ElfShdr<E>> elf_sections2;
+
   std::vector<CieRecord<E>> cies;
   std::vector<FdeRecord<E>> fdes;
   std::vector<bool> has_symver;
@@ -2089,7 +2240,12 @@ public:
   std::vector<InputSection<E> *> eh_frame_sections;
   std::vector<InputSection<E> *> sframe_sections;
   std::vector<SFrameFde<E>> sframe_fdes;
+
+  // CREL relocation tables decoded into ordinary records, indexed by
+  // relocation section index. A table not decoded up front is decoded
+  // on demand by InputSection<E>::get_rels().
   std::vector<ExactArray<ElfRel<E>>> decoded_crel;
+
   bool exclude_libs = false;
   std::map<u32, u32> gnu_properties;
   bool needs_executable_stack = false;
@@ -2099,6 +2255,7 @@ public:
   bool is_rust_obj = false;
   bool is_dwarf32 = false;
 
+  // Output .eh_frame layout
   i64 fde_idx = 0;
   i64 fde_offset = 0;
   i64 fde_size = 0;
@@ -2115,6 +2272,10 @@ public:
 
   // For LTO
   std::vector<ElfSym<E>> lto_elf_syms;
+
+  // COMDAT group signatures of the symbols of an IR object, by symbol
+  // index. IR objects have no sections, so their COMDAT groups are
+  // tracked per symbol.
   std::vector<Symbol<E> *> lto_comdat_signatures;
   std::vector<bool> lto_comdat_discarded;
 
@@ -2513,6 +2674,8 @@ inline bool is_arm_func(Context<E> &ctx, Symbol<E> &sym) {
 // arch-riscv.cc
 //
 
+// .riscv.attributes describes the ISA the output requires, merged from
+// the input files' attributes.
 template <is_riscv E>
 class RiscvAttributesSection : public Chunk<E> {
 public:
@@ -2537,6 +2700,15 @@ u64 get_eflags(Context<E> &ctx);
 void ppc64v1_rewrite_opd(Context<PPC64V1> &ctx);
 void ppc64v1_scan_symbols(Context<PPC64V1> &ctx);
 
+// .opd, the function descriptors of PowerPC64 ELFv1.
+//
+// In ELFv1 a function pointer doesn't refer to code but to a
+// descriptor: the entry point, the TOC pointer the function expects in
+// r2, and an environment pointer nobody uses. The compiler emits a
+// descriptor for every function into an input .opd; the linker
+// dissolves those (see ppc64v1_rewrite_opd() in arch-ppc64v1.cc) and
+// synthesizes descriptors here only for functions whose addresses are
+// taken, in the same way it synthesizes GOT and PLT entries.
 class PPC64OpdSection : public Chunk<PPC64V1> {
 public:
   PPC64OpdSection() {
@@ -2564,6 +2736,8 @@ public:
 extern const std::vector<std::pair<std::string_view, u32>>
 ppc64_save_restore_insns;
 
+// .save_restore_regs, the register save and restore routines that GCC
+// expects the linker to provide on PowerPC64.
 class PPC64SaveRestoreSection : public Chunk<PPC64V2> {
 public:
   PPC64SaveRestoreSection() {
@@ -2690,6 +2864,9 @@ template <>
 struct ContextExtras<PPC64V2> {
   PPC64SaveRestoreSection *save_restore = nullptr;
   Symbol<PPC64V2> *TOC = nullptr;
+
+  // Whether any input uses Power10 PC-relative calls (R_PPC64_REL24_NOTOC),
+  // which decides how thunks address their targets.
   Atomic<bool> is_power10 = false;
 };
 
@@ -2851,7 +3028,10 @@ struct Context {
     std::vector<SectionOrder> section_order;
     std::vector<Symbol<E> *> require_defined;
     std::vector<Symbol<E> *> undefined;
+
+    // --defsym=SYMBOL=VALUE, where VALUE is a symbol or an address.
     std::vector<std::pair<Symbol<E> *, std::variant<Symbol<E> *, u64>>> defsyms;
+
     std::vector<std::string> library_paths;
     std::vector<std::string> plugin_opt;
     std::vector<std::string> version_definitions;
@@ -2871,6 +3051,10 @@ struct Context {
   bool has_error = false;
 
   // Reader context
+  //
+  // Priority 1 is reserved for the internal object file. LTO-generated
+  // files use priorities beginning at 100, so regular files begin at
+  // 10000.
   i64 file_priority = 10000;
 
   // Input files with their command line positions, in the
@@ -2916,8 +3100,13 @@ struct Context {
   // Output buffer
   std::unique_ptr<OutputFile<E>> output_file;
   u8 *buf = nullptr;
+
+  // Whether an existing output file may be reused for the new output.
+  // See the comment in cmdline.cc where this is set.
   bool overwrite_output_file = false;
 
+  // The chunks that make up the output. sort_output_sections() sorts them
+  // into file order.
   std::vector<Chunk<E> *> chunks;
   Atomic<bool> needs_tlsld = false;
   Atomic<bool> has_textrel = false;
@@ -2967,6 +3156,8 @@ struct Context {
   MergedSection<E> *comment = nullptr;
 
   // For --gdb-index
+  //
+  // Partially built .gdb_index data passed between its background stages.
   // shared_ptr lets the implementation type remain in gdb-index.cc.
   std::shared_ptr<GdbIndexData> gdb_index_data;
   std::span<u8> debug_info;
@@ -3034,6 +3225,7 @@ std::ostream &operator<<(std::ostream &out, const InputFile<E> &file);
 // Symbol
 //
 
+// Symbol flags set while scanning relocations.
 enum {
   NEEDS_GOT       = 1 << 0,
   NEEDS_PLT       = 1 << 1,
@@ -3050,8 +3242,10 @@ enum {
   NO_OPD = 1 << 1, // Request an address other than .opd (PPC64V1 only)
 };
 
-// Symbol class represents a symbol. For each unique symbol name, we
-// create one instance of Symbol.
+// Symbol class represents one local symbol or one unique global symbol
+// name. For each unique global symbol name, we create one instance of
+// Symbol, and each object file has its own instances for its local
+// symbols.
 //
 // A symbol has not only one but several different addresses if it
 // has PLT or GOT entries. This class provides various functions to
@@ -3136,7 +3330,9 @@ public:
 
   ArenaPtr<InputFile<E>> file;
 
-  // Index into the symbol table of the owner file.
+  // Index into the symbol table of the owner file. During COMDAT
+  // selection, this temporarily holds the priority of the file that
+  // claims the group whose signature is this symbol.
   i32 sym_idx = -1;
 
   // Auxiliary data for dynamic symbols, allocated in ctx.arena on demand.
@@ -3144,10 +3340,16 @@ public:
 
   u16 ver_idx = VER_NDX_UNSPECIFIED;
 
-  // `flags` has NEEDS_ flags.
+  // `flags` has NEEDS_ flags. Once the NEEDS_ flags have been turned
+  // into GOT and PLT entries, the field is free to serve as a scratch
+  // mark, which range extension thunk creation uses.
   Atomic<u8> flags = 0;
 
+  // Serializes the parallel updates made while resolving definitions.
   tbb::spin_mutex mu;
+
+  // A symbol's visibility is set to the most restrictive one among the
+  // input files that refer to it. See ObjectFile<E>::merge_visibility().
   Atomic<u8> visibility = STV_DEFAULT;
 
   bool is_weak : 1 = false;
@@ -3155,24 +3357,24 @@ public:
 
   // If a symbol can be resolved to a symbol in a different ELF file at
   // runtime, `is_imported` is true. If a symbol is a dynamic symbol and
-  // can be used by other ELF file at runtime, `is_exported` is true.
+  // can be used by other ELF files at runtime, `is_exported` is true.
   //
-  // Note that both can be true at the same time. Such symbol represents
-  // a function or data exported from this ELF file which can be
-  // imported by other definition at runtime. That is actually a usual
-  // exported symbol when creating a DSO. In other words, a dynamic
-  // symbol exported by a DSO is usually imported by itself.
+  // Note that both can be true at the same time. Such a symbol represents
+  // a function or data exported from this ELF file that can be resolved
+  // to another definition at runtime. That is actually the usual case for
+  // an exported symbol when creating a DSO. In other words, a dynamic
+  // symbol exported by a DSO is usually imported by the DSO itself.
   //
   // If is_imported is true and is_exported is false, it is a dynamic
-  // symbol just imported from other DSO.
+  // symbol just imported from another DSO.
   //
   // If is_imported is false and is_exported is true, there are two
   // possible cases. If we are creating an executable, we know that
   // exported symbols cannot be intercepted by any DSO (because the
-  // dynamic loader searches a dynamic symbol from an executable before
+  // dynamic loader searches the executable for a dynamic symbol before
   // examining any DSOs), so any exported symbol is export-only in an
   // executable. If we are creating a DSO, export-only symbols
-  // represent a protected symbol (i.e. a symbol whose visibility is
+  // represent protected symbols (i.e. symbols whose visibility is
   // STV_PROTECTED).
   bool is_imported : 1 = false;
   bool is_exported : 1 = false;
@@ -3180,18 +3382,18 @@ public:
   // `is_canonical` is true if this symbol represents a "canonical" PLT.
   // Here is the explanation as to what the canonical PLT is.
   //
-  // In C/C++, the process-wide function pointer equality is guaranteed.
-  // That is, if you take an address of a function `foo`, it's always
-  // evaluated to the same address wherever you do that.
+  // In C/C++, process-wide function pointer equality is guaranteed.
+  // That is, if you take the address of a function `foo`, it always
+  // evaluates to the same address wherever you do that.
   //
   // For the sake of explanation, assume that `libx.so` exports a
   // function symbol `foo`, and there's a program that uses `libx.so`.
   // Both `libx.so` and the main executable take the address of `foo`,
-  // which must be evaluated to the same address because of the above
+  // which must evaluate to the same address because of the above
   // guarantee.
   //
-  // If the main executable is position-independent code (PIC), `foo` is
-  // evaluated to the beginning of the function code, as you would have
+  // If the main executable is position-independent code (PIC), `foo`
+  // evaluates to the beginning of the function code, as you would have
   // expected. The address of `foo` is stored to GOTs, and the machine
   // code that takes the address of `foo` reads the GOT entries at
   // runtime.
@@ -3204,46 +3406,45 @@ public:
   // position-dependent executable, but it's not if `foo` is imported
   // from some other DSO at runtime.
   //
-  // In this case, we use the address of the `foo`'s PLT entry in the
+  // In this case, we use the address of `foo`'s PLT entry in the
   // main executable (whose address is fixed at link-time) as its
   // address. In order to guarantee pointer equality, we also need to
-  // fill foo's GOT entries in DSOs with the addres of the foo's PLT
-  // entry instead of `foo`'s real address. We can do that by setting a
-  // symbol value to `foo`'s dynamic symbol. If a symbol value is set,
-  // the dynamic loader initialize `foo`'s GOT entries with that value
+  // fill foo's GOT entries in DSOs with the address of foo's PLT
+  // entry instead of `foo`'s real address. We can do that by setting the
+  // symbol value of `foo`'s dynamic symbol. If a symbol value is set,
+  // the dynamic loader initializes `foo`'s GOT entries with that value
   // instead of the symbol's real address.
   //
-  // We call such PLT entry in the main executable as "canonical".
-  // If `foo` has a canonical PLT, its address is evaluated to its
-  // canonical PLT's address. Otherwise, it's evaluated to `foo`'s
-  // address.
+  // We call such a PLT entry in the main executable "canonical". If
+  // `foo` has a canonical PLT, `foo` evaluates to its canonical PLT's
+  // address. Otherwise, it evaluates to `foo`'s real address.
   //
   // Only non-PIC main executables may have canonical PLTs. PIC
   // executables and shared objects never have a canonical PLT.
   //
-  // This bit manages if we need to make this symbol's PLT canonical.
+  // This bit indicates whether we need to make this symbol's PLT canonical.
   // This bit is meaningful only when the symbol has a PLT entry.
   bool is_canonical : 1 = false;
 
-  // If an input object file is not compiled with -fPIC (or with
-  // -fno-PIC), the file not position independent. That means the
+  // If an input object file is compiled without -fPIC (or with
+  // -fno-PIC), the file is not position independent. That means the
   // machine code included in the object file does not use GOT to access
   // global variables. Instead, it assumes that addresses of global
   // variables are known at link-time.
   //
   // Let's say `libx.so` exports a global variable `foo`, and a main
   // executable uses the variable. If the executable is not compiled
-  // with -fPIC, we can't simply apply a relocation that refers `foo`
+  // with -fPIC, we can't simply apply a relocation that refers to `foo`
   // because `foo`'s address is not known at link-time.
   //
   // In this case, we could print out the "recompile with -fPIC" error
-  // message, but there's a way to workaround.
+  // message, but there's a way to work around it.
   //
-  // The loader supports a feature so-called "copy relocations".
+  // The loader supports a feature called "copy relocations".
   // A copy relocation instructs the loader to copy data from a DSO to a
   // specified location in the main executable. By using this feature,
   // we can copy `foo`'s data to a BSS region at runtime. With that,
-  // we can apply relocations agianst `foo` as if `foo` existed in the
+  // we can apply relocations against `foo` as if `foo` existed in the
   // main executable's BSS area, whose address is known at link-time.
   //
   // Copy relocations are used only by position-dependent executables.
@@ -3264,10 +3465,10 @@ public:
   bool is_traced : 1 = false;       // for --trace-symbol
   bool is_wrapped : 1 = false;      // for --wrap
 
-  // For symbols with default symbol version, e.g. foo@@VERSION.
+  // For symbols with a default symbol version, e.g. foo@@VERSION.
   bool is_versioned_default : 1 = false;
 
-  // For symbol resolution. This flag is used rarely. See a comment in
+  // For symbol resolution. This flag is used rarely. See the comment in
   // resolve_symbols().
   bool skip_dso : 1 = false;
 
@@ -3275,7 +3476,7 @@ public:
   bool gc_root : 1 = false;
 
   // For LTO. True if the symbol is referenced by a regular object (as
-  // opposed to IR object).
+  // opposed to an IR object).
   bool referenced_by_regular_obj : 1 = false;
 
   // For LTO. True if the symbol is the signature of a COMDAT group
@@ -3340,6 +3541,9 @@ inline i64 InputSection<E>::get_priority() const {
   return ((i64)file->priority << 32) | shndx;
 }
 
+// Returns the addend of a relocation. REL-type targets (and SH-4, which
+// uses RELA records but still stores addends in place) store it in the
+// relocated location, given as `loc`.
 template <typename E>
 i64 get_addend(u8 *loc, const ElfRel<E> &rel);
 
@@ -3348,11 +3552,17 @@ inline i64 get_addend(u8 *loc, const ElfRel<E> &rel) {
   return rel.r_addend;
 }
 
+// Returns the addend of a relocation against a given section. REL-type
+// targets and SH-4 store addends in section contents, while the other
+// RELA-type targets store them in the relocation records.
 template <typename E>
 i64 get_addend(InputSection<E> &isec, const ElfRel<E> &rel) {
   return get_addend(isec.contents + rel.r_offset, rel);
 }
 
+// Writes an addend into a relocated location, for targets that store
+// addends in place, when the linker writes relocations to the output
+// file (e.g. for -r).
 template <typename E>
 void write_addend(u8 *loc, i64 val, const ElfRel<E> &rel);
 
@@ -3685,6 +3895,8 @@ inline SharedFile<E> *InputFile<E>::to_dso() {
   return static_cast<SharedFile<E> *>(this);
 }
 
+// Returns the section index of a symbol. Indices too large for the
+// 16-bit st_shndx field are stored in .symtab_shndx.
 template <typename E>
 inline i64 ObjectFile<E>::get_shndx(const ElfSym<E> &esym) {
   assert(&this->elf_syms[0] <= &esym);
@@ -3741,6 +3953,7 @@ inline InputSection<E> *ObjectFile<E>::get_section(const ElfSym<E> &esym) {
   return sections[get_shndx(esym)];
 }
 
+// Returns true if a symbol is defined in a discarded COMDAT group.
 template <typename E>
 inline bool ObjectFile<E>::is_discarded_comdat(const ElfSym<E> &esym) {
   if (comdat_discarded.empty() || esym.is_abs() || esym.is_common())
@@ -3748,14 +3961,16 @@ inline bool ObjectFile<E>::is_discarded_comdat(const ElfSym<E> &esym) {
   return comdat_discarded[get_shndx(esym)];
 }
 
+// Returns the symbol's address, taking PLT, copy relocations and section
+// fragments into account.
 template <typename E>
 u64 Symbol<E>::get_addr(Context<E> &ctx, i64 flags) const {
   if (SectionFragment<E> *frag = get_frag()) {
     if (!frag->is_alive) [[unlikely]] {
-      // This condition is met if a non-alloc section refers an
+      // This condition is met if a non-alloc section refers to an
       // alloc section and if the referenced piece of data is
       // garbage-collected. Typically, this condition occurs if a
-      // debug info section refers a string constant in .rodata.
+      // debug info section refers to a string constant in .rodata.
       return 0;
     }
 
@@ -3777,6 +3992,8 @@ u64 Symbol<E>::get_addr(Context<E> &ctx, i64 flags) const {
     return get_plt_addr(ctx);
   }
 
+  // Symbols relative to an output section (i.e. linker-synthesized
+  // symbols) hold their final address in `value`, as do absolute ones.
   InputSection<E> *isec = get_input_section();
   if (!isec)
     return value; // absolute symbol
@@ -3789,7 +4006,7 @@ u64 Symbol<E>::get_addr(Context<E> &ctx, i64 flags) const {
       // .eh_frame contents are parsed and reconstructed by the linker,
       // so pointing to a specific location in a source .eh_frame
       // section doesn't make much sense. However, CRT files contain
-      // symbols pointing to the very beginning and ending of the section.
+      // symbols pointing to the very beginning and end of the section.
       //
       // If LTO is enabled, GCC may add `.lto_priv.<whatever>` as a symbol
       // suffix. That's why we use starts_with() instead of `==` here.
@@ -3803,7 +4020,7 @@ u64 Symbol<E>::get_addr(Context<E> &ctx, i64 flags) const {
           name().starts_with("__EH_FRAME_LIST_END__"))
         return ctx.eh_frame->shdr.sh_addr + ctx.eh_frame->shdr.sh_size;
 
-      // ARM object files contain "$d" local symbol at the beginning
+      // ARM object files contain "$d" local symbols at the beginning
       // of data sections. Their values are not significant for .eh_frame,
       // so we just treat them as offset 0.
       if (name() == "$d" || name().starts_with("$d."))
@@ -3813,8 +4030,8 @@ u64 Symbol<E>::get_addr(Context<E> &ctx, i64 flags) const {
                  << *this << " " << *file;
     }
 
-    // The control can reach here if there's a relocation that refers
-    // a local symbol belonging to a comdat group section. This is a
+    // Control can reach here if there's a relocation that refers
+    // to a local symbol belonging to a comdat group section. This is a
     // violation of the spec, as all relocations should use only global
     // symbols of comdat members. However, .eh_frame tends to have such
     // relocations.
@@ -3856,10 +4073,13 @@ inline u64 Symbol<E>::get_tlsdesc_addr(Context<E> &ctx) const {
 
 // On SPARC, .plt uses 32-byte "small" entries until it grows past 0x100000
 // bytes (the reach of a small entry's branch to the resolver), after which
-// it switches to a "large" entry format. This is how many small entries fit.
+// it switches to a "large" entry format. This is how many small entries fit
+// after the 128-byte PLT header.
 constexpr i64 sparc_num_small_plt =
   (0x100000 - SPARC64::plt_hdr_size) / SPARC64::plt_size;
 
+// Returns the offset of the pltidx'th PLT entry from the beginning of
+// .plt, which starts with the PLT header.
 template <typename E>
 inline u64 to_plt_offset(i32 pltidx) {
   if constexpr (is_ppc64v1<E>) {
@@ -3911,7 +4131,7 @@ inline u64 Symbol<E>::get_got_pltgot_addr(Context<E> &ctx) const {
   //
   // Note that we don't use this function for PPC64. In PPC64, symbols
   // are always accessed through the TOC table regardless of the
-  // -fno-PIE setting. We don't need canonical PLTs on the psABIs too.
+  // -fno-PIE setting. We don't need canonical PLTs on those psABIs either.
   if (is_pde_ifunc(ctx))
     return get_got_addr(ctx) + sizeof(Word<E>);
   return get_got_addr(ctx);
@@ -3957,6 +4177,8 @@ inline i32 Symbol<E>::get_dynsym_idx(Context<E> &ctx) const {
   return aux ? aux->dynsym_idx : -1;
 }
 
+// Records a range extension thunk address. Thunks are created in
+// address order.
 template <typename E>
 void Symbol<E>::add_thunk_addr(Context<E> &ctx, u64 addr) requires needs_thunk<E> {
   if (!aux)
@@ -3966,6 +4188,7 @@ void Symbol<E>::add_thunk_addr(Context<E> &ctx, u64 addr) requires needs_thunk<E
   vec.push_back(addr);
 }
 
+// Finds a thunk for this symbol within branch range of `P`.
 template <typename E>
 u64
 Symbol<E>::get_thunk_addr(Context<E> &ctx, u64 P) const requires needs_thunk<E> {
@@ -3987,7 +4210,7 @@ inline bool Symbol<E>::has_plt(Context<E> &ctx) const {
 
 template <typename E>
 inline bool Symbol<E>::is_absolute() const {
-  // An unresolved weak symbol acts as if it were an absolute address
+  // An unresolved weak symbol acts as if it were an absolute symbol
   // at address 0
   if (is_remaining_undef_weak())
     return true;
@@ -4016,13 +4239,13 @@ inline bool Symbol<E>::is_local(Context<E> &ctx) const {
 
 template <typename E>
 inline bool Symbol<E>::is_pde_ifunc(Context<E> &ctx) const {
-  // Returns true if this is an ifunc tha uses two GOT slots
+  // Returns true if this is an ifunc that uses two GOT slots
   return is_ifunc() && !ctx.arg.pic && !is_ppc64<E>;
 }
 
 // A remaining weak undefined symbol is promoted to a dynamic symbol
-// in DSO and resolved to 0 in an executable. This function returns
-// true if it's latter.
+// in a DSO and resolved to 0 in an executable. This function returns
+// true if it's the latter.
 template <typename E>
 inline bool Symbol<E>::is_remaining_undef_weak() const {
   return !is_imported && esym().is_undef_weak();
@@ -4092,6 +4315,8 @@ inline void Symbol<E>::set_symbol_origin(Symbol<E> *sym) {
   origin = sym;
 }
 
+// Returns the symbol type, treating an IFUNC defined in a DSO as a plain
+// function since the resolver runs inside that DSO.
 template <typename E>
 inline u32 Symbol<E>::get_type() const {
   if (esym().st_type == STT_GNU_IFUNC && file->is_dso)
@@ -4099,6 +4324,8 @@ inline u32 Symbol<E>::get_type() const {
   return esym().st_type;
 }
 
+// Returns the version string of a symbol defined in a DSO, or an empty
+// string otherwise.
 template <typename E>
 inline std::string_view Symbol<E>::get_version() const {
   if (file->is_dso) {
@@ -4109,6 +4336,7 @@ inline std::string_view Symbol<E>::get_version() const {
   return "";
 }
 
+// Returns the symbol's index in the output symbol table.
 template <typename E>
 inline i64 Symbol<E>::get_output_sym_idx(Context<E> &ctx) const {
   i64 i = file->output_sym_indices[sym_idx];
@@ -4118,6 +4346,8 @@ inline i64 Symbol<E>::get_output_sym_idx(Context<E> &ctx) const {
   return file->global_symtab_idx + i;
 }
 
+// Returns the symbol's entry in the owner file's symbol table, or an
+// empty one for discarded_comdat_sym.
 template <typename E>
 inline const ElfSym<E> &Symbol<E>::esym() const {
   static const ElfSym<E> empty = {};
@@ -4162,6 +4392,8 @@ inline std::string_view Symbol<E>::name() const {
   return std::string_view(nameptr, len);
 }
 
+// Returns true if a string is a valid C identifier. A section whose name
+// is a C identifier gets __start_ and __stop_ symbols.
 inline bool is_c_identifier(std::string_view s) {
   if (s.empty())
     return false;

@@ -4,25 +4,25 @@
 // byte is stored in the "reverse" order compared to little-endian
 // processors such as x86-64.
 //
-// All instructions are 4 bytes long and aligned to 4 bytes boundaries.
+// All instructions are 4 bytes long and aligned to 4-byte boundaries.
 //
 // A notable feature of SPARC is that, unlike other RISC ISAs, it doesn't
-// need range extension thunks. It is because the SPARC's CALL instruction
-// contains a whopping 30 bits immediate. The processor scales it by 4 to
+// need range extension thunks. This is because SPARC's CALL instruction
+// contains a whopping 30-bit immediate. The processor scales it by 4 to
 // extend it to 32 bits (this is doable because all instructions are
-// aligned to 4 bytes boundaries, so the least significant two bits are
-// always zero). That means CALL's reach is PC ± 2 GiB, elinating the
-// need of range extension thunks. It comes with the cost that the CALL
-// instruction alone takes 1/4th of the instruction encoding space,
-// though.
+// aligned to 4-byte boundaries, so the least significant two bits are
+// always zero). That means CALL's reach is PC ± 2 GiB, eliminating the
+// need for range extension thunks. It comes at the cost of the CALL
+// instruction alone taking up a quarter of the instruction encoding
+// space, though.
 //
-// SPARC has 32 general purpose registers. CALL instruction saves a return
-// address to %o7, which is an alias for %r15. Thread pointer is stored to
-// %g7 which is %r7.
+// SPARC has 32 general purpose registers. The CALL instruction saves a
+// return address in %o7, which is an alias for %r15. The thread pointer is
+// stored in %g7, which is %r7.
 //
 // SPARC does not have PC-relative load/store instructions. To access data
-// in the position-independent manner, we usually first set the address of
-// .got to, for example, %l7, with the following piece of code
+// in a position-independent manner, we usually first set a register (for
+// example, %l7) to the address of .got with the following piece of code
 //
 //   sethi  %hi(. - _GLOBAL_OFFSET_TABLE_), %l7
 //   add  %l7, %lo(. - _GLOBAL_OFFSET_TABLE_), %l7
@@ -34,16 +34,17 @@
 //   retl
 //   add  %o7, %l7, %l7
 //
-// . SETHI and the following ADD materialize a 32 bits offset to .got.
-// CALL instruction sets a return address to $o7, and the subsequent ADD
-// adds it to the GOT offset to materialize the absolute address of .got.
+// . SETHI and the following ADD materialize a 32-bit offset to .got.
+// The CALL instruction sets %o7 to a return address, and the subsequent
+// ADD adds it to the GOT offset to materialize the absolute address of
+// .got.
 //
 // Note that we have a NOP after CALL and an ADD after RETL because of
-// SPARC's delay branch slots. That is, the SPARC processor always
+// SPARC's branch delay slots. That is, the SPARC processor always
 // executes one instruction after a branch even if the branch is taken.
 // This may seem like an odd behavior, and indeed it is considered as such
 // (that's a premature optimization for the early pipelined SPARC
-// processors), but that's been a part of the ISA's spec so that's what it
+// processors), but it has been part of the ISA's spec, so that's what it
 // is.
 //
 // Note also that the .got address obtained this way is not shared between
@@ -52,6 +53,9 @@
 // of code to become position-independent.
 //
 // https://github.com/rui314/psabi/blob/main/sparc.pdf
+//
+// Relocations carry a second addend in the upper 24 bits of the type
+// field; only `R_SPARC_OLO10` uses it.
 
 #if MOLD_SPARC64
 
@@ -221,6 +225,7 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       check_range(ctx, i, val, lo, hi);
     };
 
+    // The rs1, rs2 and rd register fields of the instruction at loc.
     auto rs1 = [&] { return *(ub32 *)loc & (0b11111 << 14); };
     auto rs2 = [&] { return *(ub32 *)loc & 0b11111; };
     auto rd  = [&] { return *(ub32 *)loc & (0b11111 << 25); };
@@ -330,11 +335,15 @@ void InputSection<E>::apply_reloc_alloc(Context<E> &ctx, u8 *base) {
       break;
     case R_SPARC_GOTDATA_HIX22: {
       i64 val = S + A - GOT;
+      // The high 22 bits of a value, for `sethi`, with the one's complement
+      // trick the HIX22 family uses for negative values.
       *(ub32 *)loc |= bits(val < 0 ? ~val : val, 31, 10);
       break;
     }
     case R_SPARC_GOTDATA_LOX10: {
       i64 val = S + A - GOT;
+      // The low 10 bits with the sign-extension bits of a LOX10-style
+      // immediate.
       *(ub32 *)loc |= bits(val, 9, 0) | (val < 0 ? 0b1'1100'0000'0000 : 0);
       break;
     }

@@ -3,15 +3,15 @@
 //
 // z/Architecture is a 64-bit CISC ISA developed by IBM around 2000 for
 // IBM's "big iron" mainframe computers. The computers are direct
-// descendents of IBM System/360 all the way back in 1966. I've never
-// actually seen a mainframe, and you probaly haven't either, but it looks
+// descendants of IBM System/360, dating all the way back to 1966. I've never
+// actually seen a mainframe, and you probably haven't either, but it looks
 // like the mainframe market is still large enough to sustain its ecosystem.
-// Ubuntu for example provides the official support for s390x as of 2022.
+// Ubuntu, for example, provides official support for s390x as of 2022.
 // Since they are being actively maintained, we need to support them.
 //
 // As an instruction set, s390x isn't particularly odd. It has 16 general-
 // purpose registers. Instructions are 2, 4 or 6 bytes long and always
-// aligned to 2 bytes boundaries. Despite unfamiliarty, I found that it
+// aligned to 2-byte boundaries. Despite its unfamiliarity, I found that it
 // just feels like an x86-64 in a parallel universe.
 //
 // Here is the register usage in this ABI:
@@ -26,12 +26,12 @@
 //   a2:    lower 32 bits of TP (thread pointer)
 //
 // Thread-local storage (TLS) is supported on s390x in the same way as it
-// is on other targets with one exeption. On other targets, __tls_get_addr
-// is used to get an address of a thread-local variable. On s390x,
-// __tls_get_offset is used instead. The difference is __tls_get_offset
-// returns an address of a thread-local variable as an offset from TP. So
-// we need to add TP to a return value before use. I don't know why it is
-// different, but that is the way it is.
+// is on other targets with one exception. On other targets, __tls_get_addr
+// is used to get the address of a thread-local variable. On s390x,
+// __tls_get_offset is used instead. The difference is that
+// __tls_get_offset returns the address of a thread-local variable as an
+// offset from TP. So we need to add TP to the return value before use. I
+// don't know why it is different, but that is the way it is.
 //
 // https://github.com/IBM/s390x-abi/releases/download/v1.6.1/lzsabi_s390x.pdf
 
@@ -43,6 +43,8 @@ namespace mold {
 
 using E = S390X;
 
+// Writes a 20-bit displacement, which is split into a 12-bit low part
+// and an 8-bit high part.
 static void write_mid20(u8 *loc, u64 val) {
   *(ub32 *)loc |= (bits(val, 11, 0) << 16) | (bits(val, 19, 12) << 8);
 }
@@ -59,12 +61,12 @@ void write_plt_header(Context<E> &ctx, u8 *buf) {
     0xa7, 0x0b, 0xff, 0xc2,             // aghi  %r0, -62
     0xeb, 0x10, 0x00, 0x01, 0x00, 0x0c, // srlg  %r1, %r0, 1
     0xb9, 0x08, 0x00, 0x01,             // agr   %r0, %r1
-    // Store the computed value to 56(%r15) and .got.plt[1] to 48(%15)
+    // Store the computed value to 56(%r15) and .got.plt[1] to 48(%r15)
     // where %r15 is the stack pointer.
     0xe3, 0x00, 0xf0, 0x38, 0x00, 0x24, // stg   %r0, 56(%r15)
     0xc0, 0x10, 0, 0, 0, 0,             // larl  %r1, GOTPLT_OFFSET
     0xd2, 0x07, 0xf0, 0x30, 0x10, 0x08, // mvc   48(8, %r15), 8(%r1)
-    // Branch to _dl_runtime_resolve
+    // Branch to _dl_runtime_resolve.
     0xe3, 0x10, 0x10, 0x10, 0x00, 0x04, // lg    %r1, 16(%r1)
     0x07, 0xf1,                         // br    %r1
     0x00, 0x00, 0x00, 0x00,             // (filler)

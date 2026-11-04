@@ -10,7 +10,7 @@ namespace mold {
 
 static constexpr i64 BLOCK_SIZE = 512;
 
-// A tar file consists of one or more Ustar header followed by data.
+// A tar file consists of one or more Ustar headers followed by data.
 // Each Ustar header represents a single file in an archive.
 //
 // tar is an old file format, and its `name` field is only 100 bytes long.
@@ -45,7 +45,8 @@ static void finalize(UstarHeader &hdr) {
   memcpy(hdr.magic, "ustar", 5);
   memcpy(hdr.version, "00", 2);
 
-  // Compute checksum
+  // Compute checksum. The field is six octal digits, a NUL byte and a
+  // trailing space.
   int sum = 0;
   for (i64 i = 0; i < sizeof(hdr); i++)
     sum += ((u8 *)&hdr)[i];
@@ -112,7 +113,7 @@ void TarWriter::append(std::string path, std::string_view data) {
   fwrite(data.data(), data.size(), 1, out);
   fseek(out, align_to(ftell(out), BLOCK_SIZE), SEEK_SET);
 
-  // A tar file must ends with two empty blocks
+  // A tar file must end with two empty blocks
   (void)!ftruncate(fileno(out), ftell(out) + BLOCK_SIZE * 2);
 }
 

@@ -45,6 +45,8 @@ static std::vector<std::span<u8>> split(std::span<u8> input) {
   return vec;
 }
 
+// Compresses a shard as a raw deflate stream ending with a sync flush,
+// so that the stream ends on a byte boundary and can be concatenated.
 static std::span<u8> zlib_compress(std::span<u8> input, int level) {
   // Initialize zlib stream. Since debug info is generally compressed
   // pretty well with lower compression levels, the default level is 1.
@@ -110,7 +112,7 @@ ZlibCompressor::ZlibCompressor(u8 *buf, i64 size, i64 level) {
   for (i64 i = 1; i < inputs.size(); i++)
     checksum = adler32_combine(checksum, adlers[i], inputs[i].size());
 
-  // Comput the total size
+  // Compute the total size
   compressed_size = 8; // the header and the trailer
   for (std::span<u8> &shard : shards)
     compressed_size += shard.size();
@@ -131,7 +133,7 @@ void ZlibCompressor::write_to(u8 *buf) {
     memcpy(buf + offsets[i], shards[i].data(), shards[i].size());
   });
 
-  // Write a trailer
+  // Write a trailer: an empty final block, then the Adler-32 checksum.
   u8 *end = buf + compressed_size;
   end[-6] = 3;
   end[-5] = 0;

@@ -74,6 +74,7 @@ std::ostream &operator<<(std::ostream &out, const Symbol<E> &sym) {
   return out;
 }
 
+// Reads the ELF and section headers.
 template <typename E>
 InputFile<E>::InputFile(Context<E> &ctx, MappedFile *mf)
   : mf(mf), symbols(ArenaAllocator<ArenaPtr<Symbol<E>>>(ctx.arena)),
@@ -90,8 +91,9 @@ InputFile<E>::InputFile(Context<E> &ctx, MappedFile *mf)
 
   // e_shnum contains the total number of sections in an object file.
   // Since it is a 16-bit integer field, it's not large enough to
-  // represent >65535 sections. If an object file contains more than 65535
-  // sections, the actual number is stored to sh_size field.
+  // represent >65535 sections. If an object file contains more than
+  // 65279 sections, e_shnum is zero and the actual number is stored in
+  // the first section header's sh_size field.
   i64 num_sections = (ehdr.e_shnum == 0) ? sh_begin->sh_size : ehdr.e_shnum;
 
   if (mf->data + mf->size < (u8 *)(sh_begin + num_sections))
@@ -99,8 +101,9 @@ InputFile<E>::InputFile(Context<E> &ctx, MappedFile *mf)
                << mf->size << " " << num_sections;
   elf_sections = {sh_begin, sh_begin + num_sections};
 
-  // e_shstrndx is a 16-bit field. If .shstrtab's section index is
-  // too large, the actual number is stored to sh_link field.
+  // e_shstrndx is a 16-bit field. If .shstrtab's section index is too
+  // large, the actual index is stored in the first section header's
+  // sh_link field.
   i64 shstrtab_idx = (ehdr.e_shstrndx == SHN_XINDEX)
     ? sh_begin->sh_link : ehdr.e_shstrndx;
 
@@ -173,7 +176,7 @@ ObjectFile<E>::parse_note_gnu_property(Context<E> &ctx, const ElfShdr<E> &shdr) 
 }
 
 // <format-version>
-// [ <section-length> "vendor-name" <file-tag> <size> <attribute>*]+ ]*
+// [ <section-length> "vendor-name" [ <file-tag> <size> <attribute>*]+ ]*
 template <is_riscv E>
 static void read_riscv_attributes(Context<E> &ctx, ObjectFile<E> &file,
                                   std::string_view data) {
@@ -292,7 +295,12 @@ void ObjectFile<E>::read_section_metadata(Context<E> &ctx) {
     else
       name = this->get_symbol_name(shdr.sh_info);
 
-    // Ignore a broken comdat group GCC emits for .debug_macros.
+    // With -g3, GCC puts the .debug_macro contents of each header file
+    // into a COMDAT group, but the CU's own .debug_macro section outside
+    // the group refers to it, which the ELF spec doesn't allow. If we
+    // discarded a duplicate group, the references to it would be resolved
+    // to 0, breaking the macro information. So we ignore such groups and
+    // keep all copies of them.
     // https://github.com/rui314/mold/issues/438
     if (name.starts_with("wm4."))
       continue;
@@ -415,7 +423,7 @@ void ObjectFile<E>::initialize_sections(Context<E> &ctx) {
           is_debug_section(shdr, name))
         continue;
 
-      // Ignore section is specified by --discard-section.
+      // Ignore sections specified by --discard-section.
       if (!ctx.arg.discard_section.empty() &&
           ctx.arg.discard_section.contains(name))
         continue;
@@ -436,8 +444,8 @@ void ObjectFile<E>::initialize_sections(Context<E> &ctx) {
       // Save .llvm_addrsig for --icf=safe.
       if (shdr.sh_type == SHT_LLVM_ADDRSIG && !ctx.arg.relocatable) {
         // sh_link should be the index of the symbol table section.
-        // Tools that mutates the symbol table, such as objcopy or `ld -r`
-        // tend to not preserve sh_link, so we ignore such section.
+        // Tools that mutate the symbol table, such as objcopy or `ld -r`,
+        // tend to not preserve sh_link, so we ignore such a section.
         if (shdr.sh_link != 0) {
           llvm_addrsig = isec;
           this->sections.erase(i);
@@ -484,8 +492,8 @@ void ObjectFile<E>::initialize_sections(Context<E> &ctx) {
         }
 
         // .debug_types is similar to .debug_info but contains type info
-        // only. It exists only in DWARF 4, has been removed in DWARF 5 and
-        // neither GCC nor Clang generate it by default
+        // only. It exists only in DWARF 4 and has been removed in DWARF 5.
+        // Neither GCC nor Clang generates it by default
         // (-fdebug-types-section is needed). As such there is probably
         // little need to support it.
         if (name == ".debug_types")
@@ -612,13 +620,13 @@ static void parse_fde_encoding(Context<E> &ctx, CieRecord<E> &cie) {
 }
 
 // .eh_frame contains data records explaining how to handle exceptions.
-// When an exception is thrown, the runtime searches a record from
+// When an exception is thrown, the runtime searches for a record in
 // .eh_frame with the current program counter as a key. A record that
 // covers the current PC explains how to find a handler and how to
-// transfer the control ot it.
+// transfer control to it.
 //
-// Unlike the most other sections, linker has to parse .eh_frame contents
-// because of the following reasons:
+// Unlike most other sections, the linker has to parse .eh_frame contents
+// for the following reasons:
 //
 // - There's usually only one .eh_frame section for each object file,
 //   which explains how to handle exceptions for all functions in the same
@@ -627,17 +635,17 @@ static void parse_fde_encoding(Context<E> &ctx, CieRecord<E> &cie) {
 //   functions). We want to copy only records for live functions.
 //
 // - .eh_frame contains two types of records: CIE and FDE. There's usually
-//   only one CIE at beginning of .eh_frame section followed by FDEs.
-//   Compiler usually emits the identical CIE record for all object files.
-//   We want to merge identical CIEs in an output .eh_frame section to
-//   reduce the section size.
+//   only one CIE at the beginning of the .eh_frame section followed by
+//   FDEs. Compilers usually emit identical CIE records for all object
+//   files. We want to merge identical CIEs in an output .eh_frame section
+//   to reduce the section size.
 //
 // - Scanning a .eh_frame section to find a record is an O(n) operation
 //   where n is the number of records in the section. To reduce it to
-//   O(log n), linker creates a .eh_frame_hdr section. The section
+//   O(log n), the linker creates a .eh_frame_hdr section. The section
 //   contains a sorted list of [an address in .text, an FDE address whose
 //   coverage starts at the .text address] to make binary search doable.
-//   In order to create .eh_frame_hdr, linker has to read .eh_frame.
+//   In order to create .eh_frame_hdr, the linker has to read .eh_frame.
 //
 // This function parses an input .eh_frame section.
 template <typename E>
@@ -673,9 +681,9 @@ void ObjectFile<E>::parse_ehframe(Context<E> &ctx) {
       } else {
         // This is FDE.
         if (rel_begin == rel_idx || rels[rel_begin].r_sym == 0) {
-          // FDE has no valid relocation, which means FDE is dead from
-          // the beginning. Compilers usually don't create such FDE, but
-          // `ld -r` tend to generate such dead FDEs.
+          // The FDE has no valid relocation, which means it is dead from
+          // the beginning. Compilers usually don't create such an FDE, but
+          // `ld -r` tends to generate such dead FDEs.
           continue;
         }
 
@@ -904,6 +912,8 @@ void ObjectFile<E>::initialize_local_symbols(Context<E> &ctx) {
   if (this->elf_syms.empty())
     return;
 
+  // The number of local symbols this file contributes: the null symbol
+  // plus every local symbol not in a discarded COMDAT group.
   i64 num_local_syms = 1;
   for (i64 i = 1; i < this->first_global; i++)
     if (!is_discarded_comdat(this->elf_syms[i]))
@@ -952,8 +962,8 @@ void ObjectFile<E>::initialize_local_symbols(Context<E> &ctx) {
 }
 
 // Relocations are usually sorted by r_offset in relocation tables,
-// but for some reason only RISC-V does not follow that convention.
-// We expect them to be sorted, so sort them if necessary.
+// but for some reason RISC-V and LoongArch do not always follow that
+// convention. We expect them to be sorted, so sort them if necessary.
 template <typename E>
 void ObjectFile<E>::sort_relocations(Context<E> &ctx) {
   if constexpr (is_riscv<E> || is_loongarch<E>) {
@@ -1159,13 +1169,13 @@ void ObjectFile<E>::parse_sections(Context<E> &ctx,
   sections_parsed = true;
 }
 
-// Symbols with higher priorities overwrites symbols with lower priorities.
+// Symbols with higher priorities overwrite symbols with lower priorities.
 // Here is the list of priorities, from the highest to the lowest.
 //
 //  1. Strong defined symbol
 //  2. Weak defined symbol
 //  3. Strong defined symbol in a DSO/archive
-//  4. Weak Defined symbol in a DSO/archive
+//  4. Weak defined symbol in a DSO/archive
 //  5. Common symbol
 //  6. Common symbol in an archive
 //  7. Unclaimed (nonexistent) symbol
@@ -1231,6 +1241,7 @@ void ObjectFile<E>::merge_visibility(Context<E> &ctx, Symbol<E> &sym,
   });
 }
 
+// Prints a --trace-symbol line for a reference or definition.
 template <typename E>
 static void print_trace_symbol(Context<E> &ctx, InputFile<E> &file,
                                const ElfSym<E> &esym, Symbol<E> &sym) {
@@ -1340,22 +1351,23 @@ void ObjectFile<E>::scan_relocations(Context<E> &ctx) {
   }
 }
 
-// Common symbols are used by C's tantative definitions. Tentative
+// Common symbols are used by C's tentative definitions. Tentative
 // definition is an obscure C feature which allows users to omit `extern`
 // from global variable declarations in a header file. For example, if you
 // have a tentative definition `int foo;` in a header which is included
 // into multiple translation units, `foo` will be included into multiple
-// object files, but it won't cause the duplicate symbol error. Instead,
+// object files, but it won't cause a duplicate symbol error. Instead,
 // the linker will merge them into a single instance of `foo`.
 //
 // If a header file contains a tentative definition `int foo;` and one of
-// a C file contains a definition with initial value such as `int foo = 5;`,
-// then the "real" definition wins. The symbol for the tentative definition
-// will be resolved to the real definition. If there is no "real"
-// definition, the tentative definition gets the default initial value 0.
+// the C files contains a definition with an initial value such as
+// `int foo = 5;`, then the "real" definition wins. The symbol for the
+// tentative definition will be resolved to the real definition. If there
+// is no "real" definition, the tentative definition gets the default
+// initial value 0.
 //
 // Tentative definitions are represented as "common symbols" in an object
-// file. In this function, we allocate spaces in .common or .tls_common
+// file. In this function, we allocate space in .common or .tls_common
 // for remaining common symbols that were not resolved to usual defined
 // symbols in previous passes.
 template <typename E>
@@ -1429,6 +1441,7 @@ template <typename E>
 void ObjectFile<E>::compute_symtab_size(Context<E> &ctx) {
   this->output_sym_indices.resize(this->elf_syms.size(), -1);
 
+  // Symbols in dead sections and fragments are dropped along with them.
   auto is_alive = [](Symbol<E> &sym) -> bool {
     if (SectionFragment<E> *frag = sym.get_frag())
       return frag->is_alive;
@@ -1544,6 +1557,9 @@ void SharedFile<E>::parse(Context<E> &ctx) {
   if (esyms.size() < symtab_sec->sh_info)
     Fatal(ctx) << *this << ": invalid symbol table";
 
+  // Local symbols and hidden compatibility aliases (see below) are
+  // dropped, so the table is rebuilt in elf_syms2 rather than read in
+  // place.
   i64 num_syms = esyms.size() - symtab_sec->sh_info;
   this->elf_syms2.reserve(num_syms);
   this->versyms.reserve(num_syms);
@@ -1613,10 +1629,10 @@ void SharedFile<E>::parse(Context<E> &ctx) {
     // symbol can be resolved with two different identifiers. Among
     // symbols with the same name but different versions, one of them is
     // always marked as the "default" one. This symbol is often denoted
-    // with two atsigns as `foo@@VERSION` and can be referred to either
+    // with two at signs as `foo@@VERSION` and can be referred to either
     // as `foo` or `foo@VERSION`. No other symbols have two names like that.
     //
-    // On contrary, a versioned non-default symbol can be referred only
+    // In contrast, a versioned non-default symbol can be referred to only
     // with an explicit version suffix, e.g., `foo@VERSION`.
     //
     // Here is how we resolve versioned default symbols. We resolve `foo`
@@ -1676,27 +1692,28 @@ std::string_view SharedFile<E>::get_dt_audit(Context<E> &ctx) {
 //
 // Let me explain what symbol versioning is. Symbol versioning is a
 // mechanism to allow multiple symbols of the same name but of different
-// versions live together in a shared object file. It's convenient if you
-// want to make an API-breaking change to some function but want to keep
-// old programs working with the newer libraries.
+// versions to live together in a shared object file. It's convenient if
+// you want to make an API-breaking change to some function but want to
+// keep old programs working with the newer libraries.
 //
-// With symbol versioning, dynamic symbols are resolved by (name, version)
-// tuple instead of just by name. For example, glibc 2.35 defines two
-// different versions of `posix_spawn`, `posix_spawn` of version
+// With symbol versioning, dynamic symbols are resolved by a (name,
+// version) tuple instead of just by name. For example, glibc 2.35 defines
+// two different versions of `posix_spawn`, `posix_spawn` of version
 // "GLIBC_2.15" and that of version "GLIBC_2.2.5". Any executable that
 // uses `posix_spawn` is linked either to that of "GLIBC_2.15" or that of
-// "GLIBC_2.2.5"
+// "GLIBC_2.2.5".
 //
 // Versions are just strings, and no ordering is defined between them.
 // For example, "GLIBC_2.15" is not considered a newer version of
 // "GLIBC_2.2.5" or vice versa. They are considered just different.
 //
 // If a shared object file has versioned symbols, it contains a parallel
-// array for the symbol table. Version strings can be found in that
-// parallel table.
+// array for the symbol table (.gnu.version) whose elements are version
+// indices. .gnu.version_d and .gnu.version_r map the indices to version
+// strings.
 //
 // One version is considered the "default" version for each shared object.
-// If an undefiend symbol `foo` is resolved to a symbol defined by the
+// If an undefined symbol `foo` is resolved to a symbol defined by the
 // shared object, it's marked so that it'll be resolved to (`foo`, the
 // default version of the library) at load-time.
 //
@@ -1779,8 +1796,8 @@ void SharedFile<E>::resolve_symbols(Context<E> &ctx) {
     }
 
     // A symbol with the default version is a special case because, unlike
-    // other symbols, the symbol can be referred by two names, `foo` and
-    // `foo@VERSION`. Here, we resolve `foo@VERSOIN` as a proxy of `foo`.
+    // other symbols, the symbol can be referred to by two names, `foo` and
+    // `foo@VERSION`. Here, we resolve `foo@VERSION` as a proxy for `foo`.
     Symbol<E> *sym2 = this->symbols2[i];
     if (sym2 && sym2 != &sym) {
       std::scoped_lock lock2(sym2->mu);
@@ -1827,6 +1844,7 @@ SharedFile<E>::mark_live_objects(Context<E> &ctx,
   }
 }
 
+// Returns the symbols this file defines at the same address as `sym`.
 template <typename E>
 std::span<Symbol<E> *> SharedFile<E>::get_symbols_at(Symbol<E> *sym) {
   assert(sym->file == this);
@@ -1851,13 +1869,14 @@ std::span<Symbol<E> *> SharedFile<E>::get_symbols_at(Symbol<E> *sym) {
   return {&*begin, (size_t)(end - begin)};
 }
 
-// Infer an alignment of a DSO symbol. An alignment of a symbol in other
-// .so is not something we usually care about, but when we create a copy
-// relocation for a symbol, we need to preserve its alignment requirement.
+// Infer the alignment of a DSO symbol. The alignment of a symbol in
+// another .so is not something we usually care about, but when we create
+// a copy relocation for a symbol, we need to preserve its alignment
+// requirement.
 //
 // Symbol alignment is not explicitly represented in an ELF file. In this
-// function, we conservatively infer it from a symbol address and a
-// section alignment requirement.
+// function, we conservatively infer it from the symbol's address and its
+// section's alignment requirement.
 template <typename E>
 i64 SharedFile<E>::get_alignment(Symbol<E> *sym) {
   ElfShdr<E> &shdr = this->elf_sections[sym->esym().st_shndx];
@@ -1867,6 +1886,7 @@ i64 SharedFile<E>::get_alignment(Symbol<E> *sym) {
   return align;
 }
 
+// Returns true if a symbol lives in a read-only segment.
 template <typename E>
 bool SharedFile<E>::is_readonly(Symbol<E> *sym) {
   ElfEhdr<E> &ehdr = *(ElfEhdr<E> *)this->mf->data;

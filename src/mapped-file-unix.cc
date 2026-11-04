@@ -1,3 +1,9 @@
+// Input file access.
+//
+// Every input file is read once and kept in memory for the whole link,
+// because sections, symbol names and relocation tables of object files
+// are used until the output is written.
+
 #include "mold.h"
 
 namespace mold {
@@ -47,6 +53,8 @@ MappedFile *open_file_impl(const std::string &path, std::string &error) {
     }
     mf->data = buf;
   } else if (st.st_size > 0) {
+    // We map inputs MAP_PRIVATE with write permission so that we can
+    // rewrite relocation records in place without changing the input file.
     mf->data = (u8 *)mmap(nullptr, st.st_size, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE, fd, 0);
     if (mf->data == MAP_FAILED)

@@ -64,6 +64,9 @@ InputSection<E>::InputSection(Context<E> &ctx, ObjectFile<E> &file, i64 shndx,
     uncompress(ctx);
 }
 
+// Replaces compressed contents with an uncompressed copy, which is owned
+// by ctx.string_pool. This is a no-op if the section is not compressed or
+// has already been uncompressed.
 template <typename E>
 void InputSection<E>::uncompress(Context<E> &ctx) {
   if (!(shdr().sh_flags & SHF_COMPRESSED) || is_uncompressed())
@@ -76,6 +79,9 @@ void InputSection<E>::uncompress(Context<E> &ctx) {
   set_uncompressed();
 }
 
+// Copies the first `sz` bytes of the section contents to `buf`, which
+// must not exceed sh_size. If the section is still compressed, its
+// contents are uncompressed directly into `buf`.
 template <typename E>
 void InputSection<E>::copy_contents_to(Context<E> &ctx, u8 *buf, i64 sz) {
   if (!(shdr().sh_flags & SHF_COMPRESSED) || is_uncompressed()) {
@@ -132,6 +138,8 @@ void InputSection<E>::copy_contents_to(Context<E> &ctx, u8 *buf, i64 sz) {
 // wingdi.h defines ERROR as a macro, so undefine it before use
 #undef ERROR
 
+// An action that the decision tables below take for a relocation. ERROR
+// means that the code is not position-independent.
 typedef enum : u8 { NONE, ERROR, CANONICAL, PLT } Action;
 
 template <typename E>
@@ -218,13 +226,13 @@ void InputSection<E>::scan_tlsdesc(Context<E> &ctx, Symbol<E> &sym) {
     // a TP-relative offset, so no dynamic relocation is needed.
     //
     // TLSDESC relocs must always be relaxed for statically-linked
-    // executables even if -no-relax is given. It is because a
+    // executables even if -no-relax is given. This is because a
     // statically-linked executable doesn't contain a trampoline
     // function needed for TLSDESC.
   } else if (ctx.arg.relax && sym.is_tprel_runtime_const(ctx)) {
-    // In this condition, TP-relative offset of a thread-local variable
-    // is known at process startup time, so we can relax TLSDESC to the
-    // code that reads the TP-relative offset from GOT and add TP to it.
+    // In this case, the TP-relative offset of a thread-local variable
+    // is known at process startup time, so we can relax TLSDESC to
+    // code that reads the TP-relative offset from GOT and adds TP to it.
     sym.flags |= NEEDS_GOTTP;
   } else {
     // If no relaxation is doable, we simply create a TLSDESC dynamic
@@ -242,20 +250,21 @@ void InputSection<E>::check_tlsle(Context<E> &ctx, Symbol<E> &sym,
                << " recompile with -fPIC";
 }
 
+// Copies the section to `buf` and applies relocations.
 template <typename E>
 void InputSection<E>::write_to(Context<E> &ctx, u8 *buf) {
   if (shdr().sh_type == SHT_NOBITS || sh_size == 0)
     return;
 
   // Copy data. In RISC-V and LoongArch object files, sections are not
-  // atomic unit of copying because of relaxation. That is, some
+  // atomic units of copying because of relaxation. That is, some
   // relocations are allowed to remove bytes from the middle of a
   // section and shrink the overall size of it.
   if constexpr (is_riscv<E> || is_loongarch<E>) {
     std::span<RelocDelta> deltas = extra.r_deltas;
 
     if (deltas.empty()) {
-      // If a section is not relaxed, we can copy it as a one big chunk.
+      // If a section is not relaxed, we can copy it as one big chunk.
       copy_contents_to(ctx, buf, sh_size);
     } else {
       // A relaxed section is copied piece-wise.
@@ -287,7 +296,7 @@ void InputSection<E>::write_to(Context<E> &ctx, u8 *buf) {
   }
 }
 
-// Get the name of a function containin a given offset.
+// Get the name of a function containing a given offset.
 template <typename E>
 std::string_view
 InputSection<E>::get_func_name(Context<E> &ctx, i64 offset) const {
@@ -325,7 +334,8 @@ find_comdat_owner(Context<E> &ctx, ObjectFile<E> &file, const ElfSym<E> &esym) {
 }
 
 // Test if the symbol a given relocation refers to has already been resolved.
-// If not, record that error and returns true.
+// If not, record that error and return true, so that the caller skips the
+// relocation.
 template <typename E>
 bool InputSection<E>::record_undef_error(Context<E> &ctx, const ElfRel<E> &rel) {
   // If a relocation refers to a linker-synthesized symbol for a
@@ -367,7 +377,7 @@ bool InputSection<E>::record_undef_error(Context<E> &ctx, const ElfRel<E> &rel) 
   };
 
   // A non-weak undefined symbol must be promoted to an imported symbol
-  // or resolved to an defined symbol. Otherwise, we need to report an
+  // or resolved to a defined symbol. Otherwise, we need to report an
   // error or warn on it.
   //
   // Every ELF file has an absolute local symbol as its first symbol.
@@ -407,20 +417,20 @@ static size_t find_null(std::string_view data, i64 pos, i64 entsize) {
 }
 
 // Mergeable sections (sections with SHF_MERGE bit) typically contain
-// string literals. Linker is expected to split the section contents
-// into null-terminated strings, merge them with mergeable strings
-// from other object files, and emit uniquified strings to an output
-// file.
+// string literals. The linker is expected to split the section
+// contents into null-terminated strings, merge them with mergeable
+// strings from other object files, and emit uniquified strings to an
+// output file.
 //
 // This mechanism reduces the size of an output file. If two source
 // files happen to contain the same string literal, the output will
 // contain only a single copy of it.
 //
-// It is less common than string literals, but mergeable sections can
+// Though less common than string literals, mergeable sections can
 // contain fixed-sized read-only records too.
 //
 // This function splits the section contents into small pieces that we
-// call "section fragments". Section fragment is a unit of merging.
+// call "section fragments". A section fragment is a unit of merging.
 //
 // We do not support mergeable sections that have relocations.
 template <typename E>
@@ -463,6 +473,7 @@ void MergeableSection<E>::split_contents(Context<E> &ctx) {
   counter += frag_offsets.size();
 }
 
+// Inserts the section fragments into the parent section's fragment map.
 template <typename E>
 void MergeableSection<E>::resolve_contents(Context<E> &ctx) {
   fragments.reserve(frag_offsets.size());
@@ -481,7 +492,7 @@ void MergeableSection<E>::resolve_contents(Context<E> &ctx) {
     fragments.push_back(parent.map.get_idx(frag));
   }
 
-  // Reclaim memory as we'll never use this vector again
+  // Reclaim memory as we'll never use this vector again.
   hashes.clear();
   hashes.shrink_to_fit();
 }

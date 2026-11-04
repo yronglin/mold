@@ -207,6 +207,10 @@ void create_synthetic_sections(Context<E> &ctx) {
 }
 
 // Marks the files that the given files depend on reachable, recursively.
+// A file found live is fed back to parallel_for_each as a work item of its
+// own: there are at most thousands of files, so the work items are cheap,
+// and the thread pool stays busy rather than draining between rounds of a
+// search whose frontier is often small.
 template <typename E>
 static void mark_live_objects(Context<E> &ctx,
                               std::vector<InputFile<E> *> &roots) {
@@ -218,6 +222,7 @@ static void mark_live_objects(Context<E> &ctx,
 
 template <typename E>
 static void mark_live_objects(Context<E> &ctx) {
+  // Symbols named on the command line pull in the files that define them.
   for (Symbol<E> *sym : ctx.arg.undefined)
     if (sym->file)
       sym->file->is_reachable = true;
@@ -251,15 +256,13 @@ static void mark_live_objects(Context<E> &ctx) {
 // `VER1` can be referred to either as `foo` or `foo@VER1`. No other
 // symbols have two names like that.
 //
-// By default, we insert symbols with a default version without an at-sign
-// (i.e. `foo` instead of `foo@VER1`) into our internal symbol table.
-// Therefore, if the symbol is referenced with an at-sign (i.e.
-// `foo@VER1`), the reference fails to resolve. This function corrects
-// that error.
-//
-// In this function, we check all unresolved versioned symbols of the form
-// `foo@VER1` by removing the version part and see if `foo` has version
-// `VER1`. If it does, that's the symbol we are looking for.
+// We insert symbols with a default version into our internal symbol table
+// without an at sign (i.e. `foo` instead of `foo@VER1`), so a reference
+// with an at sign (i.e. `foo@VER1`) refers to a different symbol. When a
+// DSO defines `foo` with the default version, symbol resolution makes
+// `foo@VER1` a proxy for `foo` by setting its is_versioned_default bit and
+// setting its origin to `foo`. This function redirects every reference to
+// such a proxy to `foo`.
 template <typename E>
 static void resolve_default_symver(Context<E> &ctx) {
   std::vector<InputFile<E> *> files;
@@ -286,6 +289,8 @@ static void clear_symbol(Symbol<E> &sym) {
   sym.is_exported = false;
 }
 
+// Resets the resolution of every global symbol. Local symbols belong to
+// their files and aren't resolved, so they're left alone.
 template <typename E>
 static void clear_symbols(Context<E> &ctx) {
   ctx.symbol_map.parallel_for_each([](Symbol<E> &sym) {
@@ -311,6 +316,9 @@ void gather_symbols(Context<E> &ctx) {
     });
 }
 
+// Records `file` as a candidate owner of the COMDAT group whose signature
+// is `sig`. Among the reachable objects, the one with the lowest priority
+// becomes the owner.
 template <typename E>
 static void record_comdat_owner(Symbol<E> &sig, ObjectFile<E> &file) {
   // A group claimed by an IR file belongs to the LTO result, so only an
@@ -349,6 +357,8 @@ static void parse_input_sections(Context<E> &ctx) {
       record_comdat_owner(*ref.signature(ctx), *file);
   });
 
+  // Set each group's result after all reachable files have recorded their
+  // claims.
   tbb::parallel_for_each(ctx.objs, [&](ObjectFile<E> *file) {
     if (file->is_reachable)
       for (ComdatGroupRef<E> &ref : file->comdat_groups)
@@ -476,8 +486,8 @@ void resolve_symbols(Context<E> &ctx) {
 
   // Now that we know the exact set of input files that are to be
   // included in the output file, we want to redo symbol resolution.
-  // This is because symbols defined by object files in archive files
-  // may have risen as a result of mark_live_objects().
+  // This is because the resolution of symbols defined by object files in
+  // archive files may have changed as a result of mark_live_objects().
   //
   // To redo symbol resolution, we want to clear the state first.
   clear_symbols(ctx);
@@ -715,19 +725,19 @@ get_output_section_key(Context<E> &ctx, InputSection<E> &isec,
 
 template <typename E>
 static bool is_relro(OutputSection<E> &osec) {
-  // PT_GNU_RELRO segment is a security mechanism to make more pages
+  // The PT_GNU_RELRO segment is a security mechanism to make more pages
   // read-only than we could have done without it.
   //
   // Traditionally, sections are either read-only or read-write. If a
-  // section contains dynamic relocations, it must have been put into a
+  // section contains dynamic relocations, it must be put into a
   // read-write segment so that the program loader can mutate its
   // contents in memory, even if no one will write to it at runtime.
   //
-  // RELRO segment allows us to make such pages writable only when a
-  // program is being loaded. After that, the page becomes read-only.
+  // The RELRO segment allows us to make such pages writable only when a
+  // program is being loaded. After that, the pages become read-only.
   //
-  // Some sections, such as .init, .fini, .got, .dynamic, contain
-  // dynamic relocations but doesn't have to be writable at runtime,
+  // Some sections, such as .init_array, .fini_array, .got and .dynamic,
+  // contain dynamic relocations but don't have to be writable at runtime,
   // so they are put into a RELRO segment.
   std::string_view name = osec.name;
   u32 type = osec.shdr.sh_type;
@@ -769,6 +779,8 @@ void create_output_sections(Context<E> &ctx) {
       u32 sh_flags = shdr.sh_flags & ~SHF_MERGE & ~SHF_STRINGS &
                      ~SHF_COMPRESSED & ~SHF_GNU_RETAIN;
 
+      // COMDAT group members keep their own output sections in a
+      // relocatable output.
       if (ctx.arg.relocatable && (sh_flags & SHF_GROUP)) {
         OutputSection<E> *osec =
           ctx.arena.template make<OutputSection<E>>(isec->name(), shdr.sh_type);
@@ -1218,6 +1230,8 @@ void write_repro_file(Context<E> &ctx) {
       // We reopen a file because we may have modified the contents of mf
       // in memory, which is mapped with PROT_WRITE and MAP_PRIVATE.
       MappedFile *mf2 = must_open_file(ctx, mf->name);
+
+      // Preserve the symlink name used in response.txt.
       tar->append(std::filesystem::absolute(mf->name).string(),
                   mf2->get_contents());
       mf2->unmap();
@@ -1237,7 +1251,7 @@ void check_duplicate_symbols(Context<E> &ctx) {
       const ElfSym<E> &esym = file->elf_syms[i];
       Symbol<E> &sym = *file->symbols[i];
 
-      // Skip if our symbol is undef or weak
+      // Skip if our symbol is undef, common or weak
       if (!sym.file || sym.file == file || sym.file == ctx.internal_obj ||
           esym.is_undef() || esym.is_common() || (esym.st_bind == STB_WEAK))
         continue;
@@ -1301,8 +1315,8 @@ void check_symbol_version_conflicts(Context<E> &ctx) {
   ctx.checkpoint();
 }
 
-// GCC and Clang set the SHT_NOBITS flag for an output section only if the
-// section name is .bss or similar. Sections with nonstandard names, such
+// GCC and Clang give a section the SHT_NOBITS type only if the section
+// name is .bss or similar. Sections with nonstandard names, such
 // as those defined with __attribute__((section(".sectname"))), are always
 // emitted as non-BSS sections even if they contain only uninitialized
 // variables.
@@ -1459,6 +1473,8 @@ void check_symbol_types(Context<E> &ctx) {
   });
 }
 
+// Returns the `.N` suffix of an init/fini section name, or 65536 if the
+// name has no such suffix.
 template <typename E>
 static i64 get_init_fini_priority(InputSection<E> *isec) {
   static std::regex re(R"(\.(\d+)$)", std::regex_constants::optimize);
@@ -1627,7 +1643,7 @@ template <typename E>
 void sort_debug_info_sections(Context<E> &ctx) {
   Timer t(ctx, "sort_debug_info_sections");
 
-  // True if mold is running under ctest
+  // Tests set MOLD_DEBUG to force sorting of small debug sections.
   bool is_in_test = false;
   if (char *env = getenv("MOLD_DEBUG"); env && env[0])
     is_in_test = true;
@@ -1837,6 +1853,8 @@ void compute_section_sizes(Context<E> &ctx) {
   if constexpr (needs_thunk<E>) {
     std::vector<Chunk<E> *> vec = ctx.chunks;
 
+    // On a target with range extension thunks, an executable section gets
+    // its thunks and its layout at the same time.
     auto tail = ranges::partition(vec, [&](Chunk<E> *chunk) {
       return chunk->to_osec() && (chunk->shdr.sh_flags & SHF_EXECINSTR) &&
              !ctx.arg.relocatable;
@@ -2275,7 +2293,7 @@ void sort_dynsyms(Context<E> &ctx) {
   ctx.dynstr->shdr.sh_size += tbb::parallel_scan(
     tbb::blocked_range<i64>(1, syms.size(), 1024), (i64)0, scan, std::plus());
 
-  // ELF's symbol table sh_info holds the offset of the first global symbol.
+  // ELF's symbol table sh_info holds the index of the first global symbol.
   ctx.dynsym->shdr.sh_info = globals.begin() - syms.begin();
 }
 
@@ -2988,22 +3006,22 @@ static void set_virtual_addresses_regular(Context<E> &ctx) {
       }
     }
 
-    // TLS sections are included only in PT_LOAD but also in PT_TLS.
+    // TLS sections are included not only in PT_LOAD but also in PT_TLS.
     // We align the first TLS section so that the PT_TLS segment starts
     // at an address that meets the segment's alignment requirement.
     if (is_tls(chunks[i]) && (i == 0 || !is_tls(chunks[i - 1])))
       addr = align_to(addr, get_tls_segment_alignment(ctx));
 
     // TLS BSS sections are laid out so that they overlap with the
-    // subsequent non-tbss sections. Overlapping is fine because a STT_TLS
+    // subsequent non-tbss sections. Overlapping is fine because a PT_TLS
     // segment contains an initialization image for newly-created threads,
     // and no one except the runtime reads its contents. Even the runtime
     // doesn't need a BSS part of a TLS initialization image; it just
     // leaves zero-initialized bytes as-is instead of copying zeros.
-    // So no one really read tbss at runtime.
+    // So no one really reads tbss at runtime.
     //
-    // We can instead allocate a dedicated virtual address space to tbss,
-    // but that would be just a waste of the address and disk space.
+    // We could instead allocate dedicated virtual address space to tbss,
+    // but that would just waste address space and disk space.
     if (is_tbss(chunks[i])) {
       u64 addr2 = addr;
       for (;;) {
@@ -3136,7 +3154,7 @@ static i64 set_file_offsets(Context<E> &ctx) {
           chunks[i]->shdr.sh_type == SHT_NOBITS)
         break;
 
-      // If --start-section is given, addresses may not increase
+      // If --section-start is given, addresses may not increase
       // monotonically.
       if (chunks[i]->shdr.sh_addr < first.shdr.sh_addr)
         break;
@@ -3150,7 +3168,7 @@ static i64 set_file_offsets(Context<E> &ctx) {
       i64 gap_size = chunks[i]->shdr.sh_addr - chunks[i - 1]->shdr.sh_addr -
                      chunks[i - 1]->shdr.sh_size;
 
-      // If --start-section is given, there may be a large gap between
+      // If --section-start is given, there may be a large gap between
       // sections. We don't want to allocate a disk space for a gap if
       // exists.
       if (gap_size >= ctx.page_size)
@@ -3597,6 +3615,10 @@ void write_build_id(Context<E> &ctx) {
 #if HAVE_MADVISE
       // Make the kernel page out the file contents we've just written
       // so that subsequent close(2) call will become quicker.
+      //
+      // The output file is mapped with MAP_SHARED, so MADV_DONTNEED only
+      // drops this process's page table entries for the shard; no bytes
+      // written to it are lost.
       if (i > 0 && ctx.output_file->is_mmapped)
         madvise(shards[i].data(), shards[i].size(), MADV_DONTNEED);
 #endif
@@ -3725,7 +3747,7 @@ void write_separate_debug_file(Context<E> &ctx) {
 
   sort_debug_info_sections(ctx);
 
-  // Handle --compress-debug-info
+  // Handle --compress-debug-sections
   if (ctx.arg.compress_debug_sections != ELFCOMPRESS_NONE)
     compress_debug_sections(ctx);
 
@@ -3750,6 +3772,8 @@ void write_separate_debug_file(Context<E> &ctx) {
     }
   }
 
+  // The program header keeps its size, since the placeholders' addresses
+  // were laid out around it.
   if (ctx.phdr) {
     i64 sz = ctx.phdr->phdrs.size();
     ctx.phdr->update_shdr(ctx);

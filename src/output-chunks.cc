@@ -1,3 +1,8 @@
+// This file implements output chunks, the contiguous regions that make up
+// the output file. Besides the output sections built from input sections,
+// the linker synthesizes many sections of its own (.got, .plt, .dynamic,
+// .symtab and so on). Each kind of chunk is a subclass of Chunk<E>.
+
 #include "mold.h"
 
 #include <cctype>
@@ -128,6 +133,7 @@ void OutputShdr<E>::copy_buf(Context<E> &ctx) {
       hdr[chunk->shndx] = chunk->shdr;
 }
 
+// Returns the segment flags a chunk requires.
 template <typename E>
 i64 to_phdr_flags(Context<E> &ctx, Chunk<E> *chunk) {
   // All sections are put into a single RWX segment if --omagic
@@ -288,7 +294,7 @@ static std::vector<ElfPhdr<E>> create_phdr(Context<E> &ctx) {
     define(PT_GNU_PROPERTY, PF_R, chunk);
 
   // Add PT_GNU_STACK, which is a marker segment that doesn't really
-  // contain any segments. It controls executable bit of stack area.
+  // contain any sections. It controls the executable bit of the stack.
   {
     ElfPhdr<E> phdr = {};
     phdr.p_type = PT_GNU_STACK;
@@ -311,7 +317,7 @@ static std::vector<ElfPhdr<E>> create_phdr(Context<E> &ctx) {
     }
   }
 
-  // Create a PT_ARM_EDXIDX
+  // Create a PT_ARM_EXIDX
   if constexpr (is_arm32<E>)
     if (ctx.extra.exidx)
       define(PT_ARM_EXIDX, PF_R, ctx.extra.exidx);
@@ -329,23 +335,23 @@ static std::vector<ElfPhdr<E>> create_phdr(Context<E> &ctx) {
   // Set p_paddr if --physical-image-base was given. --physical-image-base
   // is typically used in embedded programming to specify the base address
   // of a memory-mapped ROM area. In that environment, paddr refers to a
-  // segment's initial location in ROM and vaddr refers the its run-time
+  // segment's initial location in ROM and vaddr refers to its run-time
   // address.
   //
-  // When a device is turned on, it start executing code at a fixed
+  // When a device is turned on, it starts executing code at a fixed
   // location in the ROM area. At that location is a startup routine that
   // copies data or code from ROM to RAM before using them.
   //
   // .data must have different paddr and vaddr because ROM is not writable.
-  // paddr of .rodata and .text may or may be equal to vaddr. They can be
+  // paddr of .rodata and .text may or may not be equal to vaddr. They can be
   // directly read or executed from ROM, but oftentimes they are copied
   // from ROM to RAM because Flash or EEPROM are usually much slower than
   // DRAM.
   //
-  // We want to keep vaddr == pvaddr for as many segments as possible so
+  // We want to keep vaddr == paddr for as many segments as possible so
   // that they can be directly read/executed from ROM. If a gap between
-  // two segments is two page size or larger, we give up and pack segments
-  // tightly so that we don't waste too much ROM area.
+  // two segments is twice the page size or larger, we give up and pack
+  // segments tightly so that we don't waste too much ROM area.
   if (ctx.arg.physical_image_base) {
     for (i64 i = 0; i < vec.size(); i++) {
       if (vec[i].p_type != PT_LOAD)
@@ -376,6 +382,7 @@ static std::vector<ElfPhdr<E>> create_phdr(Context<E> &ctx) {
   return vec;
 }
 
+// Recomputes the program header and the TLS layout constants.
 template <typename E>
 void OutputPhdr<E>::update_shdr(Context<E> &ctx) {
   phdrs = create_phdr(ctx);
@@ -412,8 +419,10 @@ static bool is_relr(const ElfRel<E> &rel) {
          (u64)rel.r_offset % sizeof(Word<E>) == 0;
 }
 
+// Shard size for parallel processing of absolute relocations.
 static constexpr i64 DYNREL_SHARD_SIZE = 65536;
 
+// Gathers the dynamic relocations of all chunks into `buf`.
 template <typename E>
 void RelDynSection<E>::write_relocs(Context<E> &ctx, ElfRel<E> *buf) {
   for (Chunk<E> *chunk : ctx.chunks) {
@@ -425,6 +434,8 @@ void RelDynSection<E>::write_relocs(Context<E> &ctx, ElfRel<E> *buf) {
   }
 }
 
+// Encodes base relocations of each chunk in RELR form, using offsets
+// relative to the chunk.
 template <typename E>
 void RelDynSection<E>::construct_relr(Context<E> &ctx) {
   assert(ctx.arg.pack_dyn_relocs_relr);
@@ -515,9 +526,9 @@ template <typename E>
 void StrtabSection<E>::update_shdr(Context<E> &ctx) {
   i64 offset = 1;
 
-  // ARM32 uses $a, $t and $t mapping symbols to mark the beginning of
+  // ARM32 uses $a, $t and $d mapping symbols to mark the beginning of
   // ARM, Thumb and data in text, respectively. These symbols don't
-  // affect correctness of the program but helps disassembler to
+  // affect the correctness of the program but help disassemblers
   // disassemble machine code appropriately.
   if constexpr (is_arm32<E>)
     if (!ctx.arg.strip_all)
@@ -611,6 +622,10 @@ void DynstrSection<E>::copy_buf(Context<E> &ctx) {
   });
 }
 
+// Assigns each chunk and file its range of .symtab. The local symbols come
+// first (section symbols, then the chunks' synthesized symbols, then the
+// files' local symbols), followed by the global symbols. The names in
+// .strtab are laid out in the same order.
 template <typename E>
 void SymtabSection<E>::update_shdr(Context<E> &ctx) {
   i64 nsyms = 1;
@@ -696,17 +711,17 @@ void SymtabSection<E>::copy_buf(Context<E> &ctx) {
 }
 
 // An ARM64 function with a non-standard calling convention is marked with
-// STO_AARCH64_VARIANT_PCS bit in the symbol table.
+// the STO_AARCH64_VARIANT_PCS bit in the symbol table.
 //
 // A function with that bit is not safe to be called through a lazy PLT
 // stub because the PLT resolver may clobber registers that should be
 // preserved in a non-standard calling convention.
 //
 // To solve the problem, the dynamic linker scans the dynamic symbol table
-// at process startup time and resolve symbols with STO_AARCH64_VARIANT_PCS
-// bit eagerly, so that the PLT resolver won't be called for that symbol
-// lazily. As an optimization, it does so only when DT_AARCH64_VARIANT_PCS
-// is set in the dynamic section.
+// at process startup time and eagerly resolves symbols with the
+// STO_AARCH64_VARIANT_PCS bit, so that the PLT resolver won't be called
+// lazily for those symbols. As an optimization, it does so only when
+// DT_AARCH64_VARIANT_PCS is set in the dynamic section.
 //
 // This function returns true if DT_AARCH64_VARIANT_PCS needs to be set.
 template <is_arm64 E>
@@ -910,8 +925,8 @@ static std::vector<Word<E>> create_dynamic_section(Context<E> &ctx) {
     define(DT_PPC64_GLINK, ctx.plt->shdr.sh_addr + to_plt_offset<E>(0) - 32);
   }
 
-  // GDB needs a DT_DEBUG entry in an executable to store a word-size
-  // data for its own purpose. Its content is not important.
+  // GDB needs a DT_DEBUG entry in an executable to store word-size data
+  // for its own purposes. Its content is not important.
   if (!ctx.arg.shared && !ctx.arg.z_rodynamic)
     define(DT_DEBUG, 0);
 
@@ -943,7 +958,7 @@ template <typename E>
 void OutputSection<E>::compute_section_size(Context<E> &ctx) {
   ElfShdr<E> &shdr = this->shdr;
 
-  // Text sections must to be handled by create_range_extension_thunks()
+  // Text sections must be handled by create_range_extension_thunks()
   // if they may need range extension thunks.
   assert(!needs_thunk<E> || !(shdr.sh_flags & SHF_EXECINSTR) ||
          ctx.arg.relocatable);
@@ -1053,6 +1068,8 @@ i64 OutputSection<E>::get_num_dynrels(Context<E> &) const {
   return dynrel_offsets.empty() ? 0 : dynrel_offsets.back();
 }
 
+// Marks the base relocations that RELR can encode and returns their
+// offsets within the section.
 template <typename E>
 std::vector<u64> OutputSection<E>::get_relr_offsets(Context<E> &) {
   i64 nshards = dynrel_offsets.size() - 1;
@@ -1147,6 +1164,7 @@ void OutputSection<E>::write_dynrels(Context<E> &ctx, ElfRel<E> *buf) const {
   });
 }
 
+// Copies the members into `buf` and fills the padding between them.
 template <typename E>
 void OutputSection<E>::write_to(Context<E> &ctx, u8 *buf) {
   // Copy section contents to an output file.
@@ -1184,7 +1202,8 @@ void OutputSection<E>::write_to(Context<E> &ctx, u8 *buf) {
     }
   });
 
-  // Emit range extension thunks.
+  // Emit range extension thunks. They occupy the padding between members,
+  // which the loop above has already filled.
   if constexpr (needs_thunk<E>) {
     tbb::parallel_for_each(thunks, [&](std::unique_ptr<Thunk<E>> &thunk) {
       thunk->copy_buf(ctx);
@@ -1193,21 +1212,20 @@ void OutputSection<E>::write_to(Context<E> &ctx, u8 *buf) {
 }
 
 // .relr.dyn contains base relocations encoded in a space-efficient form.
-// The contents of the section is essentially just a list of addresses
+// The contents of the section are essentially just a list of addresses
 // that have to be fixed up at runtime.
 //
 // Here is the encoding scheme (we assume 64-bit ELF in this description
 // for the sake of simplicity): .relr.dyn contains zero or more address
 // groups. Each address group consists of a 64-bit start address followed
-// by zero or more 63-bit bitmaps. Let A be the address of a start
-// address. Then, the loader fixes address A. If Nth bit in the following
-// bitmap is on, the loader also fixes address A + N * 8. In this scheme,
-// one address and one bitmap can represent up to 64 base relocations in a
-// 512 bytes range.
+// by zero or more 63-bit bitmaps. Let A be a start address. Then, the
+// loader fixes address A. If the Nth bit in the following bitmap is on,
+// the loader also fixes address A + N * 8. In this scheme, one address and
+// one bitmap can represent up to 64 base relocations in a 512-byte range.
 //
-// A start address and a bitmap is distinguished by the lowest significant
-// bit. An address must be even and thus its LSB is 0 (odd address is not
-// representable in this encoding and such relocation must be stored to
+// A start address and a bitmap are distinguished by the least significant
+// bit. An address must be even and thus its LSB is 0 (an odd address is not
+// representable in this encoding and such a relocation must be stored in
 // the .rel.dyn section). A bitmap has LSB 1.
 template <typename E>
 static std::vector<u64> encode_relr(std::span<u64> offsets) {
@@ -1435,7 +1453,7 @@ void OutputSection<E>::scan_abs_relocations(Context<E> &ctx) {
     dynrel_offsets[i + 1] += dynrel_offsets[i];
 }
 
-// Compute spaces needed for thunk symbols
+// Compute the space needed for thunk symbols
 template <typename E>
 void OutputSection<E>::compute_symtab_size(Context<E> &ctx) {
   if constexpr (needs_thunk<E>) {
@@ -1443,7 +1461,7 @@ void OutputSection<E>::compute_symtab_size(Context<E> &ctx) {
     this->num_local_symtab = 0;
 
     for (std::unique_ptr<Thunk<E>> &thunk : thunks) {
-      // For ARM32, we emit additional symbol "$t", "$a" and "$d" for
+      // For ARM32, we emit additional symbols "$t", "$a" and "$d" for
       // each thunk to mark the beginning of Thumb code, ARM code and
       // data, respectively.
       if constexpr (is_arm32<E>)
@@ -1459,7 +1477,7 @@ void OutputSection<E>::compute_symtab_size(Context<E> &ctx) {
 
 // If we create range extension thunks, we also synthesize symbols to mark
 // the locations of thunks. Creating such symbols is optional, but it helps
-// disassembling and/or debugging our output.
+// with disassembling and/or debugging our output.
 template <typename E>
 void OutputSection<E>::populate_symtab(Context<E> &ctx) {
   if constexpr (needs_thunk<E>) {
@@ -1469,6 +1487,9 @@ void OutputSection<E>::populate_symtab(Context<E> &ctx) {
     u8 *strtab_base = ctx.buf + ctx.strtab->shdr.sh_offset;
     u8 *strtab = strtab_base + this->strtab_offset;
 
+    // Thunks can be removed by remove_redundant_thunks() after their
+    // symbol-table space is reserved. Zero the whole reserved region so
+    // that unused entries and names are cleared.
     memset(esym, 0, this->num_local_symtab * sizeof(ElfSym<E>));
     memset(strtab, 0, this->strtab_size);
 
@@ -1538,7 +1559,7 @@ void GotSection<E>::add_tlsdesc_symbol(Context<E> &ctx, Symbol<E> *sym) {
   //
   // If dynamic relocation is not available (i.e. if we are creating a
   // statically-linked executable), we always relax TLSDESC relocations
-  // so that no TLSDESC relocation exist at runtime.
+  // so that no TLSDESC relocation exists at runtime.
   assert(supports_tlsdesc<E>);
   assert(!ctx.arg.static_);
 
@@ -1576,18 +1597,18 @@ struct GotEntry {
 
 // Get .got and .rel.dyn contents.
 //
-// .got is a linker-synthesized constant pool whose entry is of pointer
-// size. If we know a correct value for an entry, we'll just set that value
-// to the entry. Otherwise, we'll create a dynamic relocation and let the
-// dynamic linker to fill the entry at load-time.
+// .got is a linker-synthesized constant pool whose entries are
+// pointer-sized. If we know the correct value for an entry, we'll just
+// store that value in the entry. Otherwise, we'll create a dynamic
+// relocation and let the dynamic linker fill the entry at load-time.
 //
-// Most GOT entries contain addresses of global variable. If a global
+// Most GOT entries contain addresses of global variables. If a global
 // variable is an imported symbol, we don't know its address until runtime.
 // GOT contains the addresses of such variables at runtime so that we can
 // access imported global variables via GOT.
 //
 // Thread-local variables (TLVs) also use GOT entries. We need them because
-// TLVs are accessed in a different way than the ordinary global variables.
+// TLVs are accessed in a different way than ordinary global variables.
 // Their addresses are not unique; each thread has its own copy of TLVs.
 template <typename E>
 static std::vector<GotEntry<E>> get_got_entries(Context<E> &ctx) {
@@ -1612,7 +1633,7 @@ static std::vector<GotEntry<E>> get_got_entries(Context<E> &ctx) {
     }
 
     if (sym->is_imported) {
-      // If a symbol is imported, let the dynamic linker to resolve it.
+      // If a symbol is imported, let the dynamic linker resolve it.
       add({idx, 0, E::R_GLOB_DAT, sym});
     } else if (ctx.arg.pic && sym->is_relative()) {
       // We know the symbol's address, but it needs a base relocation.
@@ -1628,7 +1649,7 @@ static std::vector<GotEntry<E>> get_got_entries(Context<E> &ctx) {
     i64 idx = sym->get_tlsgd_idx(ctx);
 
     if (sym->is_imported) {
-      // If a symbol is imported, let the dynamic linker to resolve it.
+      // If a symbol is imported, let the dynamic linker resolve it.
       add({idx, 0, E::R_DTPMOD, sym});
       add({idx + 1, 0, E::R_DTPOFF, sym});
     } else if (ctx.arg.shared) {
@@ -1665,11 +1686,11 @@ static std::vector<GotEntry<E>> get_got_entries(Context<E> &ctx) {
 
     if (sym->is_imported) {
       // If we know nothing about the symbol, let the dynamic linker
-      // to fill the GOT entry.
+      // fill the GOT entry.
       add({idx, 0, E::R_TPOFF, sym});
     } else if (ctx.arg.shared) {
       // If we know the offset within the current thread vector,
-      // let the dynamic linker to adjust it.
+      // let the dynamic linker adjust it.
       add({idx, sym->get_addr(ctx) - ctx.tls_begin, E::R_TPOFF});
     } else {
       // Otherwise, we know the offset from the thread pointer (TP) at
@@ -1796,7 +1817,7 @@ void GotSection<E>::copy_buf(Context<E> &ctx) {
       // where one slot holds a function pointer and the other an
       // argument to the function. An addend should be applied not to
       // the function pointer but to the function argument, which is
-      // usually stored to the second slot.
+      // usually stored in the second slot.
       //
       // ARM32 employs the inverted layout for some reason, so an
       // addend is applied to the first slot.
@@ -1886,9 +1907,9 @@ void GotPltSection<E>::update_shdr(Context<E> &ctx) {
 
 template <typename E>
 void GotPltSection<E>::copy_buf(Context<E> &ctx) {
-  // On PPC64, it's dynamic loader responsibility to fill the .got.plt
-  // section. Dynamic loader finds the address of the first PLT entry by
-  // DT_PPC64_GLINK and assumes that each PLT entry is 4 bytes long.
+  // On PPC64, it's the dynamic loader's responsibility to fill the .got.plt
+  // section. The dynamic loader finds the address of the first PLT entry
+  // via DT_PPC64_GLINK and assumes that each PLT entry is 4 bytes long.
   if constexpr (!is_ppc64<E>) {
     Word<E> *buf = (Word<E> *)(ctx.buf + this->shdr.sh_offset);
 
@@ -1910,6 +1931,9 @@ void PltSection<E>::update_shdr(Context<E> &ctx) {
   if (symbols.empty())
     this->shdr.sh_size = 0;
   else if constexpr (is_sparc<E>)
+    // Large SPARC PLT entries are interleaved with data pointers (see
+    // write_plt_entry() in arch-sparc64.cc), but each entry still takes
+    // E::plt_size (32) bytes in total.
     this->shdr.sh_size = E::plt_hdr_size + symbols.size() * E::plt_size;
   else
     this->shdr.sh_size = to_plt_offset<E>(symbols.size());
@@ -2043,7 +2067,7 @@ void RelPltSection<E>::copy_buf(Context<E> &ctx) {
   ElfRel<E> *buf = (ElfRel<E> *)(ctx.buf + this->shdr.sh_offset);
 
   for (Symbol<E> *sym : ctx.plt->symbols) {
-    // SPARC doesn't have a .got.plt because its role is merged to .plt.
+    // SPARC doesn't have a .got.plt because its role is merged into .plt.
     // On SPARC, .plt is writable (!) and the dynamic linker directly
     // modifies .plt's machine instructions as it resolves dynamic symbols.
     // Therefore, it doesn't need a separate section to store the symbol
@@ -2086,6 +2110,9 @@ static u64 get_symbol_size(Symbol<E> &sym) {
   return esym.st_size;
 }
 
+// Builds the output symbol table entry for a symbol. If the section index
+// doesn't fit in st_shndx, the real index is written to `*shn_xindex` for
+// .symtab_shndx; if `shn_xindex` is null in that case, nullopt is returned.
 template <typename E>
 std::optional<ElfSym<E>>
 to_output_esym(Context<E> &ctx, Symbol<E> &sym, u32 st_name, U32<E> *shn_xindex) {
@@ -2141,7 +2168,7 @@ to_output_esym(Context<E> &ctx, Symbol<E> &sym, u32 st_name, U32<E> *shn_xindex)
     shndx = sym.is_copyrel_readonly ? ctx.copyrel_relro->shndx : ctx.copyrel->shndx;
     esym.st_value = sym.get_addr(ctx);
   } else if (sym.file->is_dso || sym.esym().is_undef()) {
-    // Undefined symbol in a DSO
+    // Undefined symbol, or symbol defined in a DSO
     esym.st_shndx = SHN_UNDEF;
     esym.st_size = 0;
     if (sym.is_canonical)
@@ -2198,11 +2225,11 @@ to_output_esym(Context<E> &ctx, Symbol<E> &sym, u32 st_name, U32<E> *shn_xindex)
     esym.st_value = sym.get_addr(ctx, NO_PLT);
   }
 
-  // Symbol's st_shndx is only 16 bits wide, so we can't store a large
-  // section index there. If the total number of sections is equal to
-  // or greater than SHN_LORESERVE (= 65280), the real index is stored
-  // to a SHT_SYMTAB_SHNDX section which contains a parallel array of
-  // the symbol table.
+  // A symbol's st_shndx is only 16 bits wide, so we can't store a large
+  // section index there. If the section index is equal to or greater
+  // than SHN_LORESERVE (= 65280), the real index is stored in a
+  // SHT_SYMTAB_SHNDX section, which contains an array parallel to the
+  // symbol table.
   if (0 <= shndx && shndx < SHN_LORESERVE) {
     esym.st_shndx = shndx;
   } else if (SHN_LORESERVE <= shndx) {
@@ -2356,7 +2383,7 @@ get_merged_output_name(Context<E> &ctx, std::string_view name, u64 flags,
     return name;
 
   // GCC seems to create sections named ".rodata.strN.<mangled-symbol-name>.M"
-  // or ".rodata.cst.<mangled-symbol-name.cstN". We want to eliminate the
+  // or ".rodata.cst.<mangled-symbol-name>.cstN". We want to eliminate the
   // symbol name part from the section name.
   if (name.starts_with(".rodata.")) {
     if (flags & SHF_STRINGS) {
@@ -2385,6 +2412,9 @@ MergedSection<E>::MergedSection(std::string_view name, i64 flags, i64 type,
   this->shdr.sh_entsize = entsize;
 }
 
+// Finds or creates the merged section an input section belongs to.
+// Files are converted in parallel, and nearly every lookup finds an
+// existing section, so the list is only write-locked to add one.
 template <typename E>
 MergedSection<E> *
 MergedSection<E>::get_instance(Context<E> &ctx, std::string_view name,
@@ -2431,7 +2461,7 @@ MergedSection<E>::get_instance(Context<E> &ctx, std::string_view name,
     return nullptr;
   };
 
-  // Search for an exiting output section.
+  // Search for an existing output section.
   static std::shared_mutex mu;
   {
     std::shared_lock lock(mu);
@@ -2455,13 +2485,17 @@ template <typename E>
 SectionFragment<E> *
 MergedSection<E>::insert(Context<E> &ctx, std::string_view data, u64 hash,
                          i64 p2align) {
-  // Even if GC is enabled, we garbage-collect only memory-mapped strings.
-  // Non-memory-allocated strings are typically identifiers used by debug info.
-  // To remove such strings, use the `strip` command.
+  // Even if GC is enabled, we garbage-collect only memory-allocated
+  // strings. Non-memory-allocated strings are typically identifiers used
+  // by debug info. To remove such strings, use the `strip` command.
   bool is_alive = !ctx.arg.gc_sections || !(this->shdr.sh_flags & SHF_ALLOC);
 
   SectionFragment<E> *frag =
     map.insert(data, hash, SectionFragment(ctx, *this, is_alive)).first;
+
+  // Most insertions find the fragment there already. update_maximum()
+  // writes the alignment only when it grows, so that we don't bounce the
+  // cache line of a popular fragment between cores.
   update_maximum(frag->p2align, p2align);
   return frag;
 }
@@ -2493,13 +2527,14 @@ static void add_comment_strings(Context<E> &ctx) {
     add("mold command line: " + get_cmdline_args(ctx));
 }
 
+// Splits the members into fragments and deduplicates them.
 template <typename E>
 void MergedSection<E>::resolve(Context<E> &ctx) {
   tbb::parallel_for_each(members, [&](MergeableSection<E> *sec) {
     sec->split_contents(ctx);
   });
 
-  // We aim 2/3 occupation ratio
+  // We aim for a 2/3 occupancy ratio
   map.resize(estimator.get_cardinality() * 3 / 2);
 
   tbb::parallel_for_each(members, [&](MergeableSection<E> *sec) {
@@ -2523,6 +2558,7 @@ void MergedSection<E>::resolve(Context<E> &ctx) {
     assign_offsets(ctx);
 }
 
+// Lays out the live fragments and computes the section size.
 template <typename E>
 void MergedSection<E>::compute_section_size(Context<E> &ctx) {
   if (!resolved)
@@ -2532,6 +2568,13 @@ void MergedSection<E>::compute_section_size(Context<E> &ctx) {
     assign_offsets(ctx);
 }
 
+// Lays out a resolved merged section. The output layout follows the hash
+// table: shard by shard, in the deterministic order of get_sorted_entries().
+// Within a shard, fragments that must be reachable with 32-bit relocations
+// come first; the 32-bit halves of all shards precede the other halves.
+//
+// Different merged sections have no shared mutable state, so this function
+// can run for all of them in parallel.
 template <typename E>
 void MergedSection<E>::assign_offsets(Context<E> &ctx) {
   std::vector<i64> sizes(map.NUM_SHARDS * 2);
@@ -2593,6 +2636,8 @@ template <typename E>
 void MergedSection<E>::write_to(Context<E> &ctx, u8 *buf) {
   i64 shard_size = map.nbuckets / map.NUM_SHARDS;
 
+  // assign_offsets() gave each shard one region for its 32-bit fragments
+  // and one for the rest, so each shard writes only its two regions.
   tbb::parallel_for((i64)0, map.NUM_SHARDS, [&](i64 i) {
     // There might be gaps between strings to satisfy alignment requirements.
     // If that's the case, we need to zero-clear them.
@@ -2640,7 +2685,9 @@ void EhFrameSection<E>::construct(Context<E> &ctx) {
     file->fde_size = offset;
   });
 
-  // Uniquify CIEs and assign offsets to them.
+  // Uniquify CIEs and assign offsets to them. The first CIE of each set of
+  // identical CIEs becomes the leader that represents the set. Leaders are
+  // laid out in input order, followed by each file's FDEs.
   std::vector<CieRecord<E> *> leaders;
   auto find_leader = [&](CieRecord<E> &cie) -> CieRecord<E> * {
     for (CieRecord<E> *leader : leaders)
@@ -2787,6 +2834,7 @@ void EhFrameSection<E>::copy_buf(Context<E> &ctx) {
   }
 }
 
+// Reports an .eh_frame relocation whose value doesn't fit.
 template <typename E>
 void EhFrameSection<E>::check_range(Context<E> &ctx, InputSection<E> &isec,
                                     const ElfRel<E> &rel, i64 val, i64 lo,
@@ -2990,6 +3038,9 @@ void EhFrameRelocSection<E>::copy_buf(Context<E> &ctx) {
                      get_addend(isec, r) + target->offset, r);
     } else {
       buf->r_sym = sym.get_output_sym_idx(ctx);
+
+      // With REL, a relocation against a non-section symbol keeps the
+      // addend already in .eh_frame.
       if constexpr (E::is_rela)
         buf->r_addend = get_addend(isec, r);
     }
@@ -3062,7 +3113,7 @@ void CopyrelSection<E>::add_symbol(Context<E> &ctx, Symbol<E> *sym) {
 
   // We need to create dynamic symbols not only for this particular symbol
   // but also for its aliases (i.e. other symbols at the same address)
-  // becasue otherwise the aliases are broken apart at runtime.
+  // because otherwise the aliases are broken apart at runtime.
   // For example, `environ`, `_environ` and `__environ` in libc.so are
   // aliases. If one of the symbols is copied by a copy relocation, other
   // symbols have to refer to the copied place as well.
@@ -3091,8 +3142,8 @@ void CopyrelSection<E>::write_dynrels(Context<E> &ctx, ElfRel<E> *buf) const {
   }
 }
 
-// .gnu.version section contains version indices as a parallel array for
-// .dynsym. If a dynamic symbol is a defined one, its version information
+// The .gnu.version section contains version indices in an array parallel
+// to .dynsym. If a dynamic symbol is a defined one, its version information
 // is in .gnu.version_d. Otherwise, it's in .gnu.version_r.
 template <typename E>
 void VersymSection<E>::update_shdr(Context<E> &ctx) {
@@ -3106,18 +3157,18 @@ void VersymSection<E>::copy_buf(Context<E> &ctx) {
 }
 
 // If `-z pack-relative-relocs` is specified, we'll create a .relr.dyn
-// section and store base relocation records to that section instead of
-// to the usual .rela.dyn section.
+// section and store base relocation records in that section instead of
+// in the usual .rela.dyn section.
 //
-// .relr.dyn is relatively new feature and not supported by glibc until
-// 2.38 which was released in 2022. If we don't do anything, executables
-// built with `-z pack-relative-relocs` would just crash immediately on
-// startup with an older version of glibc.
+// .relr.dyn is a relatively new feature and is not supported by glibc
+// before 2.36, which was released in 2022. If we don't do anything,
+// executables built with `-z pack-relative-relocs` would just crash
+// immediately on startup with an older version of glibc.
 //
-// As a workaround, we'll add a dependency to a dummy version name
+// As a workaround, we'll add a dependency on a dummy version name
 // "GLIBC_ABI_DT_RELR" if `-z pack-relative-relocs` is given so that
-// executables built with the option failed with a more friendly "version
-// `GLIBC_ABI_DT_RELR' not found" error message. glibc 2.38 or later knows
+// executables built with the option fail with a friendlier "version
+// `GLIBC_ABI_DT_RELR' not found" error message. glibc 2.36 or later knows
 // about this dummy version name and simply ignores it.
 template <typename E>
 static bool is_glibc2(SharedFile<E> &file) {
@@ -3156,7 +3207,8 @@ void VerneedSection<E>::construct(Context<E> &ctx) {
   contents.resize((sizeof(ElfVerneed<E>) + sizeof(ElfVernaux<E>)) *
                   (syms.size() + 1));
 
-  // Fill .gnu.version_r.
+  // Fill .gnu.version_r. It consists of a verneed entry per shared
+  // library, each followed by its vernaux entries.
   u8 *buf = (u8 *)&contents[0];
   u8 *ptr = buf;
   ElfVerneed<E> *verneed = nullptr;
@@ -3178,6 +3230,7 @@ void VerneedSection<E>::construct(Context<E> &ctx) {
   };
 
   auto start_group = [&](SharedFile<E> &file) {
+    // sh_info of .gnu.version_r is the number of verneed entries.
     this->shdr.sh_info++;
     if (verneed)
       verneed->vn_next = ptr - (u8 *)verneed;
@@ -3372,7 +3425,7 @@ void NotePropertySection<E>::update_shdr(Context<E> &ctx) {
     } else if (GNU_PROPERTY_X86_UINT32_OR_AND_LO <= key &&
                key <= GNU_PROPERTY_X86_UINT32_OR_AND_HI) {
       // An OR-AND feature is set if all input object files have the property
-      // and some of them has the feature.
+      // and some of them have the feature.
       auto has_key = [&](ObjectFile<E> *file) {
         return file->gnu_properties.contains(key);
       };
@@ -3578,6 +3631,8 @@ void ComdatGroupSection<E>::update_shdr(Context<E> &ctx) {
     this->shdr.sh_info = sym.get_output_sym_idx(ctx);
 }
 
+// The contents of a section group are a flag word (GRP_COMDAT) followed by
+// the section indices of its members.
 template <typename E>
 void ComdatGroupSection<E>::copy_buf(Context<E> &ctx) {
   U32<E> *buf = (U32<E> *)(ctx.buf + this->shdr.sh_offset);

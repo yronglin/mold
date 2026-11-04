@@ -77,6 +77,9 @@ private:
   HANDLE handle;
 };
 
+// Opens an output file of the given size. A regular file is written
+// through a memory mapping. Anything else, such as a device, a pipe or
+// standard output, is assembled in memory and written out at the end.
 template <typename E>
 std::unique_ptr<OutputFile<E>>
 OutputFile<E>::open(Context<E> &ctx, std::string path, i64 filesize, int perm) {

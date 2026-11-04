@@ -53,6 +53,7 @@ void fork_child() {
   pipe_write_fd = pipefd[1];
 }
 
+// Tells the parent that the output is complete.
 template <typename E>
 void notify_parent() {
   if (pipe_write_fd == -1)
@@ -86,6 +87,10 @@ static std::string find_dso(Context<E> &ctx, std::filesystem::path self) {
   Fatal(ctx) << "mold-wrapper.so is missing";
 }
 
+// `mold -run COMMAND ARGS...` runs a command with mold interposed as the
+// linker. The preload library mold-wrapper.so intercepts the exec family
+// of functions in the processes that the command starts and replaces `ld`
+// with mold.
 template <typename E>
 [[noreturn]]
 void process_run_subcommand(Context<E> &ctx, int argc, char **argv) {

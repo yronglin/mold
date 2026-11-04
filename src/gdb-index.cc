@@ -1,6 +1,6 @@
 // This file contains code to read DWARF debug info to create .gdb_index.
 //
-// .gdb_index is an optional section to speed up GNU debugger. It contains
+// .gdb_index is an optional section to speed up the GNU debugger. It contains
 // two maps: 1) a map from function/variable/type names to compunits, and
 // 2) a map from function address ranges to compunits. gdb uses these
 // maps to quickly find a compunit given a name or an instruction pointer.
@@ -30,26 +30,27 @@
 // that overlap with each other in memory.
 //
 // .gdb_index contains an on-disk hash table for names, so gdb can
-// lookup names without loading all strings into memory and construct an
+// look up names without loading all strings into memory and constructing an
 // in-memory hash table.
 //
 // Names are in .debug_gnu_pubnames and .debug_gnu_pubtypes input
 // sections. These sections are created if `-ggnu-pubnames` is given.
+// These input sections are consumed instead of copied to the output.
 // Besides names, these sections contain attributes for each name so
 // that gdb can distinguish type names from function names, for example.
 //
 // A compunit contains one or more function address ranges. If an
 // object file is compiled without -ffunction-sections, it contains
 // only one .text section and therefore contains a single address range.
-// Such range is typically stored directly to the compunit.
+// Such a range is typically stored directly in the compunit.
 //
 // If an object file is compiled with -ffunction-sections, it contains
 // more than one .text section, and it has as many address ranges as
 // the number of .text sections. Such discontiguous address ranges are
-// stored to .debug_ranges in DWARF 2/3/4 and .debug_rnglists/.debug_addr
+// stored in .debug_ranges in DWARF 2/3/4 and in .debug_rnglists/.debug_addr
 // in DWARF 5.
 //
-// .debug_info section contains DWARF debug info. Although we don't need
+// The .debug_info section contains DWARF debug info. Although we don't need
 // to parse the whole .debug_info section to read address ranges, we
 // have to do a little bit. DWARF is complicated and often handled using
 // a library such as libdwarf. But we don't use any library because we
@@ -121,8 +122,13 @@ struct SectionHeaderV9 {
 
 // Build-time state for one unique name in the .gdb_index symbol table.
 struct MapValue {
+  // gdb's own hash of the name, which decides its hash table slot.
   u32 gdb_hash = 0;
+
+  // The number of units the name occurs in.
   Atomic<u32> count;
+
+  // Offsets in the constant pool, assigned by a parallel prefix scan.
   u32 name_offset = 0;
   u32 type_vector_offset = 0;
 };
@@ -207,6 +213,8 @@ struct GdbIndexData {
   std::vector<Compunit> cus;
   std::vector<Typeunit> tus;
   std::unique_ptr<GdbNameMap> map;
+
+  // The names in output order.
   std::vector<GdbNameMap::Entry *> entries;
   std::unique_ptr<u8[]> tables;
   PoolSize pool_size;
@@ -526,11 +534,11 @@ read_rnglist_range(std::vector<std::pair<u64, u64>> &vec, u8 *p,
   }
 }
 
-// Returns a list of address ranges explained by a compunit at the
-// `offset` in an output .debug_info section.
+// Returns a list of address ranges described by a compunit at `offset` in
+// an output .debug_info section.
 //
 // .debug_info contains DWARF debug info records, so this function
-// parses DWARF. If a designated compunit contains multiple ranges, the
+// parses DWARF. If the compunit contains multiple ranges, the
 // ranges are read from .debug_ranges (or .debug_rnglists for DWARF5).
 // Otherwise, a range is read directly from .debug_info (or possibly
 // from .debug_addr for DWARF5).
