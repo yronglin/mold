@@ -43,8 +43,22 @@
 # include <unistd.h>
 #endif
 
+// xxhash.h #includes system headers inside its own `extern "C"` block.
+// When compiled with Clang modules, those #includes become module imports,
+// which Clang warns about. They are harmless, so silence the warning.
+#if defined(__has_warning)
+# if __has_warning("-Wmodule-import-in-extern-c")
+#  define MOLD_XXHASH_PRAGMA 1
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wmodule-import-in-extern-c"
+# endif
+#endif
 #define XXH_INLINE_ALL 1
 #include "../third-party/xxhash/xxhash.h"
+#ifdef MOLD_XXHASH_PRAGMA
+# pragma clang diagnostic pop
+# undef MOLD_XXHASH_PRAGMA
+#endif
 
 #ifdef NDEBUG
 # define unreachable() __builtin_unreachable()

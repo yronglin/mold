@@ -53,6 +53,42 @@ include(GNUInstallDirs)
 add_executable(mold)
 target_compile_features(mold PRIVATE cxx_std_20)
 
+# Use Clang header modules if -DMOLD_USE_CLANG_MODULES=ON (the default with
+# Clang). lib/module.modulemap and src/module.modulemap describe mold's
+# headers as modules, so Clang precompiles each of them (together with the
+# standard library and oneTBB headers they include) once into the module
+# cache and reuses the result for every source file, which speeds up the
+# build considerably. This requires libc++, which ships its own module map.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(MOLD_USE_CLANG_MODULES_DEFAULT ON)
+else()
+  set(MOLD_USE_CLANG_MODULES_DEFAULT OFF)
+endif()
+option(MOLD_USE_CLANG_MODULES "Build mold with Clang header modules"
+  ${MOLD_USE_CLANG_MODULES_DEFAULT})
+
+if(MOLD_USE_CLANG_MODULES)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "MOLD_USE_CLANG_MODULES requires Clang")
+  endif()
+
+  # Everything, including bundled oneTBB, must use the same C++ library.
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
+  add_link_options($<$<LINK_LANGUAGE:CXX>:-stdlib=libc++>)
+
+  target_compile_options(mold PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++ -fmodules -fcxx-modules
+      -fmodules-cache-path=${CMAKE_BINARY_DIR}/module-cache
+      -fmodule-map-file=${CMAKE_SOURCE_DIR}/lib/module.modulemap
+      -fmodule-map-file=${CMAKE_SOURCE_DIR}/src/module.modulemap>)
+
+  # libc++ is linked statically so that the resulting executable does not
+  # depend on a libc++ shared library, which is not installed on most
+  # Linux distributions by default.
+  target_link_options(mold PRIVATE -stdlib=libc++ -static-libstdc++)
+  target_link_libraries(mold PRIVATE -Wl,-Bstatic c++abi -Wl,-Bdynamic)
+endif()
+
 if(MINGW)
   target_link_libraries(mold PRIVATE dl)
 else()

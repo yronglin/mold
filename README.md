@@ -156,6 +156,12 @@ You might need to pass a C++20 compiler command name to `cmake`. In the
 example above, `c++` is passed. If that doesn't work for you, try a specific
 version of a compiler, such as `g++-10` or `clang++-12`.
 
+When built with Clang, mold uses Clang header modules (`-fmodules`) and
+libc++, which is linked statically. Each of mold's headers is then compiled
+only once, which roughly halves the build time. Clang must come with libc++
+and libc++abi. To build with Clang without modules, pass
+`-DMOLD_USE_CLANG_MODULES=OFF`.
+
 By default, `mold` is installed to `/usr/local/bin`. You can change the
 installation location by passing `-DCMAKE_INSTALL_PREFIX=<directory>`.
 For other cmake options, see the comments in `CMakeLists.txt`.

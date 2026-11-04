@@ -1,0 +1,27 @@
+// Clang module map for mold's support library. When mold is compiled with
+// -fmodules, Clang builds each header listed here once into a precompiled
+// module and reuses it for every translation unit that #includes it,
+// instead of re-parsing the header (and the large standard library and
+// oneTBB headers it pulls in) for each .cc file.
+
+module mold_lib {
+  module integers {
+    header "integers.h"
+    export *
+  }
+
+  module atomics {
+    header "atomics.h"
+    export *
+  }
+
+  module siphash {
+    header "siphash.h"
+    export *
+  }
+
+  module lib {
+    header "lib.h"
+    export *
+  }
+}

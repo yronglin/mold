@@ -1,0 +1,18 @@
+// Clang module map for the mold linker headers. See lib/module.modulemap.
+
+module mold_src {
+  module elf {
+    header "elf.h"
+    export *
+  }
+
+  module mold {
+    header "mold.h"
+    export *
+  }
+
+  module lto {
+    header "lto.h"
+    export *
+  }
+}
